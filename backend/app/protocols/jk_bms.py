@@ -1,22 +1,22 @@
-"""JK-BMS (Jikong) serial protocol — start bytes ``0x4E 0x57``.
+"""JK-BMS "JK02_32S" protocol (modern Jikong BMS over RS485/UART, header 0x55 0xAA 0xEB 0x90).
 
-Frame: ``4E 57 <length:2> <terminal:4> <cmd:1> <source:1> <type:1> <data...> <checksum:4>``
-where ``length`` counts everything after the two start bytes (i.e. total - 2) and the
-checksum is a plain 4-byte sum of all preceding bytes. The "read all" request returns an
-info frame whose data section is a sequence of identified registers (0x79 cell voltages
-first, then 0x80.. fixed-width values).
-
-Daisy-chained packs on one RS485 bus are addressed by the 4-byte ``terminal`` field — set
-each pack a unique RS485 address in the JK app, then query each address from the one link.
+Newer JK BMS stream fixed 300-byte frames; the realtime one is record type 0x02 (cell info).
+A poll sends the read-cell-info command (header 0xAA 0x55 0x90 0xEB, command 0x96, 1-byte sum
+checksum) and then syncs to a 0x02 frame in the stream. All multi-byte values are
+little-endian. Offsets below are for the 32-cell (JK02_32S) layout and were verified against
+live frames.
 """
 
 from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-START = b"\x4e\x57"
-CMD_READ_ALL = 0x06
-SOURCE_PC = 0x03
+RESP_HEADER = b"\x55\xaa\xeb\x90"
+CMD_HEADER = b"\xaa\x55\x90\xeb"
+TYPE_CELL_INFO = 0x02
+FRAME_LEN = 300          # JK02_32S frame size
+CELL_BASE = 6            # 32 * uint16 LE cell millivolts
+MIN_PARSE = 192          # we only need offsets up to ~190; tolerate a truncated tail
 
 
 class ProtocolError(Exception):
@@ -24,110 +24,81 @@ class ProtocolError(Exception):
 
 
 def build_read_all(address: int = 0) -> bytes:
-    """Frame a 'read all' request for the pack at the given RS485 ``address``."""
-    body = bytes(
-        [
-            (address >> 24) & 0xFF, (address >> 16) & 0xFF, (address >> 8) & 0xFF, address & 0xFF,
-            CMD_READ_ALL, SOURCE_PC, 0x00,  # terminal, command, frame source, transport type
-            0x00,                            # frame info / register 0x00 = read all
-            0x00, 0x00, 0x00, 0x00,          # record number
-            0x68,                            # end identifier
-        ]
-    )
-    frame = bytearray(START)
-    length = 2 + len(body) + 4  # length field counts itself + body + the 4 checksum bytes
-    frame += length.to_bytes(2, "big")
-    frame += body
-    frame += (sum(frame) & 0xFFFFFFFF).to_bytes(4, "big")
+    """Command frame requesting the cell-info (realtime) record. 20 bytes, 1-byte sum CRC."""
+    frame = bytearray(CMD_HEADER)
+    frame += bytes([0x96, 0x00])              # command 0x96 = read cell info
+    frame += int(address).to_bytes(4, "little")
+    frame += bytes(19 - len(frame))           # pad to 19 bytes
+    frame.append(sum(frame) & 0xFF)           # checksum
     return bytes(frame)
 
 
-def frame_total_len(header: bytes) -> int:
-    """Total frame length from the 4-byte header (start + length field)."""
-    if len(header) >= 4 and header[:2] == START:
-        return 2 + int.from_bytes(header[2:4], "big")
-    return len(header)  # not a JK frame -> don't try to read more
+def _u16(b, o): return int.from_bytes(b[o:o + 2], "little")
+def _i16(b, o): return int.from_bytes(b[o:o + 2], "little", signed=True)
+def _u32(b, o): return int.from_bytes(b[o:o + 4], "little")
+def _i32(b, o): return int.from_bytes(b[o:o + 4], "little", signed=True)
 
 
-# Fixed value sizes (bytes) for the data registers we read. 0x79 (cells) is handled
-# specially (it is length-prefixed). Walking stops at the first unknown register id.
-_SIZES = {
-    0x80: 2, 0x81: 2, 0x82: 2, 0x83: 2, 0x84: 2, 0x85: 1, 0x86: 1,
-    0x87: 2, 0x88: 2, 0x89: 4, 0x8A: 2, 0x8B: 2, 0x8C: 2,
-}
+def find_cell_frame(buf: bytes) -> bytes:
+    """Locate a record-type 0x02 (cell info) frame within a streamed buffer."""
+    i = buf.find(RESP_HEADER)
+    while i != -1:
+        if i + 5 <= len(buf) and buf[i + 4] == TYPE_CELL_INFO:
+            return buf[i : i + FRAME_LEN]
+        i = buf.find(RESP_HEADER, i + 1)
+    raise ProtocolError("no JK02 cell-info (0x02) frame in stream")
 
 
-def _temp(raw: int) -> int:
-    """JK temperature encoding: 0-100 = °C; >100 = negative (100 - raw)."""
-    return raw if raw <= 100 else 100 - raw
+def parse(buf: bytes) -> Tuple[List[int], Dict[str, float]]:
+    """Find and decode a cell-info frame. Returns (cell_millivolts, fields)."""
+    frame = find_cell_frame(buf)
+    if len(frame) < MIN_PARSE:
+        raise ProtocolError(f"short JK02 frame: {len(frame)} bytes")
+    # Validate the trailing sum checksum only when the whole 300-byte frame is present.
+    if len(frame) >= FRAME_LEN and (sum(frame[: FRAME_LEN - 1]) & 0xFF) != frame[FRAME_LEN - 1]:
+        raise ProtocolError("JK02 checksum mismatch")
+
+    mask = _u16(frame, 70)
+    all_cells = [_u16(frame, CELL_BASE + 2 * i) for i in range(32)]
+    cells = [all_cells[i] for i in range(32) if mask & (1 << i)] or [c for c in all_cells if c]
+
+    f: Dict[str, float] = {
+        "temp_mosfet": _i16(frame, 144) * 0.1,
+        "pack_voltage": _u32(frame, 150) * 0.001,
+        "power": _u32(frame, 154) * 0.001,
+        "pack_current": _i32(frame, 158) * 0.001,
+        "temp1": _i16(frame, 162) * 0.1,
+        "temp2": _i16(frame, 164) * 0.1,
+        "soc": frame[173],
+        "remaining_capacity": _u32(frame, 174) * 0.001,
+        "nominal_capacity": _u32(frame, 178) * 0.001,
+        "cycles": _u32(frame, 182),
+        "cycle_capacity": _u32(frame, 186) * 0.001,
+    }
+    if len(frame) > 190:
+        f["soh"] = frame[190]
+    return cells, f
 
 
-def _find_cells(frame: bytes) -> int:
-    """Locate register 0x79 (cell voltages) — the first data register in the info frame."""
-    for i in range(4, len(frame) - 2):
-        if frame[i] == 0x79:
-            n = frame[i + 1]
-            if n and n % 3 == 0 and n <= 3 * 32 and i + 2 + n <= len(frame):
-                return i
-    raise ProtocolError("no cell-voltage register (0x79) found")
-
-
-def parse(raw: bytes) -> Tuple[List[int], Dict[int, int]]:
-    """Validate a 'read all' reply; return (cell_millivolts, {register_id: value})."""
-    if len(raw) < 11 or raw[:2] != START:
-        raise ProtocolError(f"bad start: {raw[:4].hex(' ')}")
-    total = 2 + int.from_bytes(raw[2:4], "big")
-    if len(raw) < total:
-        raise ProtocolError(f"short frame: have {len(raw)}, need {total}")
-    frame = raw[:total]
-    if (sum(frame[:-4]) & 0xFFFFFFFF) != int.from_bytes(frame[-4:], "big"):
-        raise ProtocolError("checksum mismatch")
-
-    start = _find_cells(frame)
-    ncell = frame[start + 1] // 3
-    cells = [int.from_bytes(frame[start + 2 + 3 * i + 1 : start + 2 + 3 * i + 3], "big")
-             for i in range(ncell)]
-
-    off = start + 2 + 3 * ncell
-    end = total - 4
-    fields: Dict[int, int] = {}
-    while off < end:
-        rid = frame[off]
-        size = _SIZES.get(rid)
-        if size is None:
-            break  # reached a register we don't model; we already have the key fields
-        fields[rid] = int.from_bytes(frame[off + 1 : off + 1 + size], "big")
-        off += 1 + size
-    return cells, fields
-
-
-def to_metrics(cells: List[int], fields: Dict[int, int]) -> Dict[str, Dict[str, object]]:
-    """Map a parsed reply to normalized {key: {value, unit, label}} BMS metrics."""
+def to_metrics(cells: List[int], f: Dict[str, float]) -> Dict[str, Dict[str, object]]:
+    """Map a parsed frame to normalized {key: {value, unit, label}} BMS metrics."""
     out: Dict[str, Dict[str, object]] = {}
 
     def add(key, value, unit, label):
         out[key] = {"value": value, "unit": unit, "label": label}
 
-    if 0x83 in fields:
-        add("pack_voltage", round(fields[0x83] * 0.01, 2), "V", "Pack voltage")
-    if 0x84 in fields:
-        raw = fields[0x84]
-        mag = round((raw & 0x7FFF) * 0.01, 2)
-        # Bit 15 set = charging (positive); else discharging (negative).
-        current = mag if raw & 0x8000 else -mag
-        add("pack_current", current, "A", "Pack current")
-        if 0x83 in fields:
-            add("power", round(fields[0x83] * 0.01 * current, 1), "W", "Pack power")
-    if 0x85 in fields:
-        add("soc", fields[0x85], "%", "State of charge")
-    if 0x87 in fields:
-        add("cycles", fields[0x87], "", "Charge cycles")
-    if 0x80 in fields:
-        add("temp_mosfet", _temp(fields[0x80]), "°C", "MOSFET temperature")
-    if 0x81 in fields:
-        add("cell_temp", _temp(fields[0x81]), "°C", "Battery temperature 1")
-    if 0x82 in fields:
-        add("temp_battery2", _temp(fields[0x82]), "°C", "Battery temperature 2")
+    add("pack_voltage", round(f["pack_voltage"], 2), "V", "Pack voltage")
+    add("pack_current", round(f["pack_current"], 2), "A", "Pack current")
+    add("power", round(f["power"] if f["pack_current"] >= 0 else -f["power"], 1), "W", "Pack power")
+    add("soc", int(f["soc"]), "%", "State of charge")
+    if "soh" in f:
+        add("soh", int(f["soh"]), "%", "State of health")
+    add("remaining_capacity", round(f["remaining_capacity"], 1), "Ah", "Remaining capacity")
+    add("nominal_capacity", round(f["nominal_capacity"], 1), "Ah", "Nominal capacity")
+    add("cycles", int(f["cycles"]), "", "Charge cycles")
+    add("cell_temp", round(f["temp1"], 1), "°C", "Battery temperature 1")
+    add("temp_battery2", round(f["temp2"], 1), "°C", "Battery temperature 2")
+    add("temp_mosfet", round(f["temp_mosfet"], 1), "°C", "MOSFET temperature")
 
     if cells:
         lo, hi = min(cells), max(cells)

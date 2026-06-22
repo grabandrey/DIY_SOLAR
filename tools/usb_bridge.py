@@ -328,18 +328,17 @@ def _looks_like_modbus_reply(buf: bytes) -> bool:
 
 
 def _jk_read_all_frame(address: int = 0) -> bytes:
-    """JK-BMS 0x4E 0x57 'read all' request (4-byte sum checksum)."""
-    body = bytes([(address >> 24) & 0xFF, (address >> 16) & 0xFF, (address >> 8) & 0xFF,
-                  address & 0xFF, 0x06, 0x03, 0x00, 0x00, 0, 0, 0, 0, 0x68])
-    frame = bytearray(b"\x4e\x57")
-    frame += (2 + len(body) + 4).to_bytes(2, "big")
-    frame += body
-    frame += (sum(frame) & 0xFFFFFFFF).to_bytes(4, "big")
+    """JK-BMS JK02 read-cell-info command (header AA 55 90 EB, command 0x96, 1-byte sum CRC)."""
+    frame = bytearray(b"\xaa\x55\x90\xeb")
+    frame += bytes([0x96, 0x00])
+    frame += int(address).to_bytes(4, "little")
+    frame += bytes(19 - len(frame))
+    frame.append(sum(frame) & 0xFF)
     return bytes(frame)
 
 
 def _probe_jk(ser) -> bytes:
-    """Send a JK-BMS 'read all' and return the raw reply (a JK frame starts 0x4E 0x57)."""
+    """Send the JK02 read command and return raw stream bytes (frames start 55 AA EB 90)."""
     ser.write(_jk_read_all_frame(0))
     ser.flush()
     return _read_for(ser, 2.0, stop_on=None)
@@ -367,28 +366,20 @@ def _test_serial(path: str, baud: int, protocol: str = "phocos") -> None:
             pass
 
         if protocol == "jk":
-            print("[*] sending JK-BMS read-all (0x4E 0x57)...")
+            print("[*] sending JK-BMS JK02 read command, reading the stream...")
             buf = _probe_jk(ser)
-            if buf.startswith(b"\x4e\x57"):
-                print(f"[OK] JK reply ({len(buf)} bytes): {buf[:32].hex(' ')}...")
-                print(f"     Valid JK frame — attach with the 'jk' driver at baud {baud}.")
+            idx = buf.find(b"\x55\xaa\xeb\x90")
+            if idx != -1:
+                rtype = buf[idx + 4] if idx + 4 < len(buf) else None
+                print(f"[OK] JK02 frame found ({len(buf)} bytes, record type {rtype:#04x}): "
+                      f"{buf[idx:idx+16].hex(' ')}...")
+                print(f"     Valid JK-BMS — attach with the 'jk' driver at baud {baud}.")
                 return
             if buf:
-                print(f"[?] got {len(buf)} bytes, not a JK frame: {buf[:32].hex(' ')}")
-                print("     If this repeats at every baud, the BMS may be in Modbus mode.")
-            # fall through to a Modbus probe in case the RS485 port is Modbus, not 0x4E57
-            try:
-                ser.reset_input_buffer()
-            except Exception:  # noqa: BLE001
-                pass
-            print("[*] trying Modbus-RTU read as a fallback...")
-            mb = _probe_modbus(ser)
-            if _looks_like_modbus_reply(mb):
-                print(f"[OK] Modbus reply ({len(mb)} bytes): {mb.hex(' ')}")
-                print("     This JK speaks Modbus-RTU on RS485, not 0x4E57 — needs a JK-Modbus driver.")
-                return
-            print("[!] no usable reply. Sweep bauds (JK is usually 115200): "
-                  "--baud 115200 / 9600. Check RS485 A/B wiring and that only one master is on the bus.")
+                print(f"[?] got {len(buf)} bytes, no 55 AA EB 90 header: {buf[:32].hex(' ')}")
+                print("     Wrong baud (JK is 115200) or RS485 A/B swapped.")
+            else:
+                print("[!] no data. Check RS485 A/B wiring, 120Ω termination, and baud (115200).")
             return
 
         # 1) Voltronic ASCII (the protocol the backend's axpert/phocos/growatt drivers speak).
