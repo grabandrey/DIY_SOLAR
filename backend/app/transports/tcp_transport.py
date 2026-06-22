@@ -105,13 +105,44 @@ class TcpTransport(Transport):
                 await self.close()
                 raise
 
+    async def collect(self, payload: bytes, *, duration: float, max_bytes: int = 65536) -> bytes:
+        async with self._lock:
+            if not self._writer or self._writer.is_closing():
+                await self.open()
+            try:
+                assert self._writer and self._reader
+                await self._drain_input()
+                self._writer.write(payload)
+                await self._writer.drain()
+                buf = bytearray()
+                loop = asyncio.get_event_loop()
+                deadline = loop.time() + duration
+                while loop.time() < deadline and len(buf) < max_bytes:
+                    try:
+                        chunk = await asyncio.wait_for(
+                            self._reader.read(4096), max(0.05, deadline - loop.time())
+                        )
+                    except asyncio.TimeoutError:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk
+                return bytes(buf)
+            except Exception:
+                await self.close()
+                raise
+
     async def _drain_input(self) -> None:
-        """Discard any bytes left buffered from a previous (late) reply so reads stay
-        framed — important when polling several Modbus slaves over one connection."""
+        """Discard bytes left buffered from a previous (late) reply so reads stay framed.
+
+        Bounded to a short window: a continuously-streaming device (e.g. JK-BMS) never has a
+        gap, so an unbounded drain would block forever. We only clear the immediate backlog.
+        """
         assert self._reader
+        deadline = asyncio.get_event_loop().time() + 0.05
         try:
-            while True:
-                leftover = await asyncio.wait_for(self._reader.read(512), 0.005)
+            while asyncio.get_event_loop().time() < deadline:
+                leftover = await asyncio.wait_for(self._reader.read(512), 0.01)
                 if not leftover:
                     break
         except asyncio.TimeoutError:

@@ -45,22 +45,26 @@ def response_len(count: int) -> int:
 
 
 def parse_registers(raw: bytes, count: int, slave: int = SLAVE) -> List[int]:
-    """Validate a func-0x04 reply and return the register values as ints."""
+    """Validate a func-0x04 reply and return the register values as ints.
+
+    Tolerates a few leading garbage/echo bytes by scanning for the real frame header
+    (slave + func + byte-count) and verifying its CRC, rather than failing on raw[0].
+    """
+    nbytes = 2 * count
+    total = 5 + nbytes
+    # Try aligned first, then search a small window for the frame start.
+    for off in range(0, max(1, len(raw) - total + 1)):
+        if raw[off] == slave and raw[off + 1] == FUNC_READ_INPUT and raw[off + 2] == nbytes:
+            frame = raw[off : off + total]
+            if len(frame) == total and crc16(frame[: 3 + nbytes]) == frame[3 + nbytes :]:
+                body = frame[3 : 3 + nbytes]
+                return [int.from_bytes(body[i : i + 2], "big") for i in range(0, nbytes, 2)]
+
     if len(raw) < 5:
         raise ProtocolError(f"short modbus response: {raw.hex(' ')}")
-    if raw[0] != slave:
-        raise ProtocolError(f"wrong slave id {raw[0]} (want {slave})")
-    if raw[1] & 0x80:  # exception response: function code has the high bit set
+    if raw[0] == slave and raw[1] & 0x80:
         raise ProtocolError(f"modbus exception code {raw[2] if len(raw) > 2 else '?'}")
-    if raw[1] != FUNC_READ_INPUT:
-        raise ProtocolError(f"unexpected function {raw[1]:#04x}")
-    nbytes = raw[2]
-    if nbytes != 2 * count or len(raw) < 3 + nbytes + 2:
-        raise ProtocolError(f"bad byte count {nbytes} for {count} regs in {raw.hex(' ')}")
-    body = raw[3 : 3 + nbytes]
-    if crc16(raw[: 3 + nbytes]) != raw[3 + nbytes : 5 + nbytes]:
-        raise ProtocolError("CRC mismatch")
-    return [int.from_bytes(body[i : i + 2], "big") for i in range(0, nbytes, 2)]
+    raise ProtocolError(f"no valid frame for slave {slave} in {raw[:8].hex(' ')}…")
 
 
 def u32(regs: List[int], addr: int) -> int:

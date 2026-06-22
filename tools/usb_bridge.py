@@ -378,24 +378,19 @@ def _jk_dump(path: str, baud: int, seconds: float = 4.0) -> None:
     print(f"[i] {len(frames)} JK frames; record types: "
           f"{sorted(set(t for _, t in frames if t is not None))}")
 
-    seen = []
-    for off, rtype in frames:
-        if rtype != 0x02 or off + 70 > len(buf):
+    # Per-0x02-frame detail: show header bytes so any per-pack address/id field is visible.
+    print("[i] cell-info (0x02) frames in order  [hdr = 8 bytes from 0x55 header]:")
+    for n, (off, rtype) in enumerate(f for f in frames if f[1] == 0x02):
+        if off + 70 > len(buf):
             continue
         cells = [int.from_bytes(buf[off + 6 + 2 * k: off + 8 + 2 * k], "little") for k in range(32)]
         cells = [c for c in cells if c]
-        sig = tuple(round(c, -1) for c in cells)
-        if sig not in [s for s, _ in seen]:
-            seen.append((sig, cells))
-    print(f"[i] {len(seen)} DISTINCT cell-info pack(s) seen:")
-    for n, (_sig, cells) in enumerate(seen, 1):
         v = sum(cells) / 1000
-        print(f"    pack {n}: {len(cells)} cells, ~{v:.2f} V, cells(mV)={cells}")
-    if len(seen) <= 1:
-        print("[!] only one distinct pack seen. If you have more, they may not broadcast on")
-        print("    this bus (each may need a unique RS485 address, or addressed polling). Paste")
-        print("    this output and the first ~64 bytes below so the multi-pack framing can be set up.")
-        print(f"    head: {buf[:64].hex(' ')}")
+        hdr = buf[off: off + 8].hex(" ")
+        pre = buf[max(0, off - 2): off].hex(" ")  # bytes just before the header
+        print(f"    #{n}: hdr={hdr}  byte5={buf[off+5]:#04x}  pre=[{pre}]  {len(cells)}cells ~{v:.2f}V")
+    print("[i] Look for a byte that is constant within a pack but differs between packs —")
+    print("    that's the RS485 address. Paste this whole block.")
 
 
 def _test_serial(path: str, baud: int, protocol: str = "phocos") -> None:

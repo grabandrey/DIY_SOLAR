@@ -20,9 +20,11 @@ from .base import BMSDevice
 
 log = logging.getLogger(__name__)
 
-# Read enough of the stream to span more than one full broadcast cycle of all packs.
-DEFAULT_WINDOW = 8000
-READ_TIMEOUT = 4.0
+# The JK streams at its own (slow) pace, so we read for a fixed DURATION and take whatever
+# arrived rather than a fixed byte count (which would time out). The window must span more
+# than one full broadcast cycle to capture every pack at least once.
+DEFAULT_WINDOW_SECONDS = 5.0
+MAX_WINDOW_BYTES = 16000
 
 
 class JKBms(BMSDevice):
@@ -30,16 +32,22 @@ class JKBms(BMSDevice):
         return (await self.poll_many())[0]
 
     async def poll_many(self) -> List[Reading]:
-        window = int(self.options.get("window_bytes", DEFAULT_WINDOW))
-        try:
-            # The command restarts the broadcast, so packs come back in a stable order.
-            buf = await self.transport.transact(
-                jk.build_read_all(0), read_bytes=window, timeout=READ_TIMEOUT
-            )
-            packs = jk.distinct_packs(buf)
-        except Exception as exc:  # noqa: BLE001 - whole link down -> single offline reading
-            log.warning("JK-BMS poll failed for %s: %s", self.device_id, exc)
-            return [self._offline_reading(str(exc))]
+        duration = float(self.options.get("window_seconds", DEFAULT_WINDOW_SECONDS))
+        max_bytes = int(self.options.get("window_bytes", MAX_WINDOW_BYTES))
+        packs, last = None, None
+        for attempt in range(2):
+            try:
+                buf = await self.transport.collect(
+                    jk.build_read_all(0), duration=duration, max_bytes=max_bytes
+                )
+                packs = jk.distinct_packs(buf)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                await self.transport.close()  # reconnect to resync the stream
+        if packs is None:
+            log.warning("JK-BMS poll failed for %s: %s", self.device_id, last)
+            return [self._offline_reading(str(last))]
 
         units = self.options.get("units")
         if units:

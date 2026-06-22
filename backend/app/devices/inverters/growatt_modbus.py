@@ -45,12 +45,21 @@ class GrowattSPFModbus(InverterDevice):
         self._slaves: Optional[List[int]] = None
         self._polls_since_discovery = 0
 
-    async def _read_unit(self, slave: int, timeout: Optional[float] = None) -> List[int]:
+    async def _read_unit(self, slave: int, timeout: Optional[float] = None, retries: int = 2) -> List[int]:
         frame = gm.build_read(gm.READ_START, gm.READ_COUNT, slave=slave)
-        raw = await self.transport.transact(
-            frame, read_bytes=gm.response_len(gm.READ_COUNT), timeout=timeout
-        )
-        return gm.parse_registers(raw, gm.READ_COUNT, slave=slave)
+        last: Exception = gm.ProtocolError("no read")
+        for attempt in range(retries + 1):
+            try:
+                raw = await self.transport.transact(
+                    frame, read_bytes=gm.response_len(gm.READ_COUNT), timeout=timeout
+                )
+                return gm.parse_registers(raw, gm.READ_COUNT, slave=slave)
+            except gm.ProtocolError as exc:
+                # Misaligned/garbled frame: reconnect to flush stale serial state, then retry.
+                last = exc
+                if attempt < retries:
+                    await self.transport.close()
+        raise last
 
     async def _probe(self, slave: int) -> bool:
         for _ in range(DISCOVERY_RETRIES):

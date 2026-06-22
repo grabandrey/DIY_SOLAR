@@ -50,6 +50,14 @@ class Transport(abc.ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not support framed reads")
 
+    async def collect(self, payload: bytes, *, duration: float, max_bytes: int = 65536) -> bytes:
+        """Write ``payload``, then read whatever arrives for ``duration`` seconds.
+
+        For devices that stream at their own pace (e.g. JK-BMS broadcasts) where a fixed-size
+        read would time out. Returns the accumulated bytes (possibly fewer than max_bytes).
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support streaming reads")
+
 
 def build_transport(config: Dict[str, Any]) -> Transport:
     """Factory: build a transport from a config dict.
