@@ -523,9 +523,10 @@ class Bridge:
 
     _PORT_MAP_FILE = os.path.expanduser("~/.solar_usb_bridge_ports.json")
 
-    def __init__(self, baud, base_port, advertise_host, all_hid, vid_filter, pid_filter):
+    def __init__(self, baud, base_port, advertise_host, all_hid, vid_filter, pid_filter, disco_port=5510):
         self.baud = baud
         self.base_port = base_port
+        self.disco_port = disco_port
         self.advertise_host = advertise_host
         self.all_hid = all_hid
         self.vid_filter = vid_filter
@@ -535,6 +536,9 @@ class Bridge:
         # Persistent stable_id -> tcp_port map so each physical device keeps the same TCP
         # port across restarts (the backend's attach config points at host:port).
         self._port_map: dict[str, int] = self._load_port_map()
+        # Heal any stale assignment that collides with the discovery port (would make the
+        # bridge fail to bind its own disco server).
+        self._port_map = {k: v for k, v in self._port_map.items() if v != self.disco_port}
 
     def _load_port_map(self) -> dict:
         try:
@@ -554,7 +558,7 @@ class Bridge:
         """Return the device's permanent TCP port, assigning the next free one if new."""
         if dev_id in self._port_map:
             return self._port_map[dev_id]
-        used = set(self._port_map.values())
+        used = set(self._port_map.values()) | {self.disco_port}  # never reuse the disco port
         port = self.base_port
         while port in used:
             port += 1
@@ -567,6 +571,11 @@ class Bridge:
         found: dict[str, dict] = {}
 
         for p in list_ports.comports():
+            # Skip the motherboard's built-in 16550 UARTs (/dev/ttyS*) — nothing is attached
+            # and they'd clutter the port map (a PC can expose 10+ of them). USB adapters are
+            # ttyUSB*/ttyACM*.
+            if p.device.startswith("/dev/ttyS"):
+                continue
             stable = _stable_serial_path(p.device)
             found[f"serial:{stable}"] = {
                 "kind": "serial",
@@ -1044,7 +1053,8 @@ def main() -> None:
         log.warning("hidapi not installed — only serial devices will be detected "
                     "(Axpert/Phocos are usually HID: pip3 install hidapi)")
 
-    bridge = Bridge(args.baud, args.base_port, advertise_host, args.all_hid, vid_filter, pid_filter)
+    bridge = Bridge(args.baud, args.base_port, advertise_host, args.all_hid, vid_filter, pid_filter,
+                    disco_port=args.disco_port)
     bridge.scan()
 
     def scanner():
