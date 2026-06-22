@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import logging
 import platform
 import socket
 import subprocess
@@ -48,6 +49,11 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# Live logs. logging.StreamHandler flushes after every record, so output appears in real
+# time under `journalctl -u usb-bridge -f` (plain print() is block-buffered when stdout is a
+# pipe and would lag). Verbosity is raised to DEBUG with --verbose.
+log = logging.getLogger("usb_bridge")
 
 try:
     import serial
@@ -136,11 +142,11 @@ def _register_loop(feed_url: str, interval: float = 10.0) -> None:
             )
             urllib.request.urlopen(req, timeout=3).read()
             if not announced:
-                print(f"[i] registered with backend at {target}")
+                log.info("registered with backend at %s", target)
                 announced = True
         except Exception as exc:  # noqa: BLE001
             if announced:
-                print(f"[!] backend registration lost ({exc}); retrying")
+                log.warning("backend registration lost (%s); retrying", exc)
             announced = False
         time.sleep(interval)
 
@@ -518,17 +524,17 @@ class Bridge:
                     self._next_port += 1
                     self.devices[dev_id] = {**d, "tcp_port": tcp_port, "present": True}
                     self._start_listener(dev_id, tcp_port)
-                    print(f"[+] detected {d['kind']} {d['info']['path']} -> tcp {tcp_port}")
+                    log.info("detected %s %s -> tcp %d", d["kind"], d["info"]["path"], tcp_port)
                 else:
                     self.devices[dev_id].update(info=d["info"], target=d["target"])
                     if not self.devices[dev_id]["present"]:
-                        print(f"[+] re-detected {d['info']['path']}")
+                        log.info("re-detected %s", d["info"]["path"])
                     self.devices[dev_id]["present"] = True
 
             for dev_id, entry in self.devices.items():
                 if dev_id not in found and entry["present"]:
                     entry["present"] = False
-                    print(f"[-] unplugged {entry['info']['path']}")
+                    log.info("unplugged %s", entry["info"]["path"])
 
     def snapshot(self) -> list[dict]:
         with self.lock:
@@ -551,18 +557,26 @@ class Bridge:
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             srv.bind(("0.0.0.0", tcp_port))
             srv.listen(1)
+            log.debug("listening on tcp %d for %s", tcp_port, dev_id)
             while True:
-                conn, _ = srv.accept()
-                threading.Thread(target=self._dispatch, args=(conn, dev_id), daemon=True).start()
+                conn, addr = srv.accept()
+                threading.Thread(target=self._dispatch, args=(conn, addr, dev_id), daemon=True).start()
 
         threading.Thread(target=serve, daemon=True).start()
 
-    def _dispatch(self, conn: socket.socket, dev_id: str) -> None:
+    def _dispatch(self, conn: socket.socket, addr, dev_id: str) -> None:
         entry = self.devices.get(dev_id, {})
-        if entry.get("kind") == "hid":
-            self._relay_hid(conn, entry["target"])
-        else:
-            self._relay_serial(conn, entry.get("target"))
+        label = entry.get("info", {}).get("path", dev_id)
+        peer = f"{addr[0]}:{addr[1]}"
+        t0 = time.time()
+        log.info("client %s connected for %s", peer, label)
+        try:
+            if entry.get("kind") == "hid":
+                self._relay_hid(conn, entry["target"], peer, label)
+            else:
+                self._relay_serial(conn, entry.get("target"), peer, label)
+        finally:
+            log.info("client %s closed %s after %.1fs", peer, label, time.time() - t0)
 
     @staticmethod
     def _read_handshake(conn: socket.socket):
@@ -585,20 +599,22 @@ class Bridge:
             return baud, rest
         return baud, first
 
-    def _relay_serial(self, conn: socket.socket, path) -> None:
+    def _relay_serial(self, conn: socket.socket, path, peer="?", label="") -> None:
         baud_override, leftover = self._read_handshake(conn)
         baud = baud_override or self.baud
         try:
             ser = _open_serial(path, baud)
         except Exception as exc:  # noqa: BLE001
-            print(f"[!] cannot open {path} @ {baud}: {exc}")
+            log.error("cannot open %s @ %d for %s: %s", path, baud, peer, exc)
             _serial_open_help(path, exc)
             conn.close()
             return
+        log.info("opened %s @ %d for %s", path, baud, peer)
         if leftover:
             ser.write(leftover)
 
         stop = threading.Event()
+        stats = {"from_dev": 0, "to_dev": 0}
 
         def serial_to_tcp():
             while not stop.is_set():
@@ -607,6 +623,8 @@ class Bridge:
                 except Exception:  # noqa: BLE001
                     break
                 if data:
+                    stats["from_dev"] += len(data)
+                    log.debug("%s <- %dB %s", label, len(data), data[:24].hex(" "))
                     try:
                         conn.sendall(data)
                     except OSError:
@@ -621,6 +639,8 @@ class Bridge:
                     break
                 if not data:
                     break
+                stats["to_dev"] += len(data)
+                log.debug("%s -> %dB %s", label, len(data), data[:24].hex(" "))
                 try:
                     ser.write(data)
                 except Exception:  # noqa: BLE001
@@ -636,14 +656,17 @@ class Bridge:
         except Exception:  # noqa: BLE001
             pass
         conn.close()
+        log.info("relay %s ended: %dB from device, %dB to device",
+                 label, stats["from_dev"], stats["to_dev"])
 
-    def _relay_hid(self, conn: socket.socket, hid_path) -> None:
+    def _relay_hid(self, conn: socket.socket, hid_path, peer="?", label="") -> None:
         try:
             dev = HidDev(hid_path)
         except Exception as exc:  # noqa: BLE001
-            print(f"[!] cannot open HID device: {exc}")
+            log.error("cannot open HID device for %s: %s", peer, exc)
             conn.close()
             return
+        log.info("opened HID %s for %s", label, peer)
 
         _, buf = self._read_handshake(conn)  # baud irrelevant for HID
         try:
@@ -655,6 +678,7 @@ class Bridge:
                     buf += data
                 cmd, _, buf = buf.partition(b"\r")
                 resp = self._hid_exchange(dev, cmd + b"\r")
+                log.debug("%s cmd %r -> %dB %s", label, cmd[:16], len(resp), resp[:24].hex(" "))
                 if resp:
                     conn.sendall(resp)
         except OSError:
@@ -888,8 +912,17 @@ def main() -> None:
     ap.add_argument("--protocol", choices=("phocos", "axpert", "growatt", "jk"), default="phocos",
                     help="device family for --test-serial. phocos/axpert = Voltronic ASCII (QPIGS); "
                          "growatt also tries Growatt-SPF Modbus-RTU; jk = JK-BMS 0x4E57 (Modbus fallback).")
+    ap.add_argument("--verbose", "-v", action="store_true",
+                    help="verbose live logs: log every relayed request/response (hex preview)")
     ap.add_argument("--list", action="store_true", help=argparse.SUPPRESS)  # back-compat
     args = ap.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+    )
 
     if args.list_usb or args.list:
         _list_usb()
@@ -921,7 +954,7 @@ def main() -> None:
         if SERVER_IP:
             try:
                 advertise_host = _local_ip_toward(SERVER_IP)
-                print(f"[i] advertising {advertise_host} (route to server {SERVER_IP})")
+                log.info("advertising %s (route to server %s)", advertise_host, SERVER_IP)
             except OSError as exc:
                 sys.exit(f"could not determine local IP toward server {SERVER_IP}: {exc}\n"
                          f"Pass --advertise-host <this-machine-ip> explicitly instead.")
@@ -929,8 +962,8 @@ def main() -> None:
             advertise_host = "host.docker.internal"
 
     if not HID_OK:
-        print("[warn] hidapi not installed — only serial devices will be detected.")
-        print("       Axpert/Phocos are usually HID: pip3 install hidapi (brew install hidapi on macOS)\n")
+        log.warning("hidapi not installed — only serial devices will be detected "
+                    "(Axpert/Phocos are usually HID: pip3 install hidapi)")
 
     bridge = Bridge(args.baud, args.base_port, advertise_host, args.all_hid, vid_filter, pid_filter)
     bridge.scan()
@@ -941,7 +974,7 @@ def main() -> None:
             try:
                 bridge.scan()
             except Exception as exc:  # noqa: BLE001
-                print(f"[!] scan error: {exc}")
+                log.error("scan error: %s", exc)
 
     threading.Thread(target=scanner, daemon=True).start()
 
@@ -950,9 +983,9 @@ def main() -> None:
     if SERVER_IP:
         threading.Thread(target=_register_loop, args=(feed_url,), daemon=True).start()
 
-    print(f"\nDiscovery feed:  {feed_url}/ports")
-    print("Leave this running, then open the Solar Assistant UI -> Devices -> Scan.")
-    print("If nothing is detected, run:  python3 tools/usb_bridge.py --list-usb\n")
+    log.info("discovery feed: %s/ports  (leave running; open UI -> Devices -> Scan)", feed_url)
+    if args.verbose:
+        log.debug("verbose mode: relayed traffic will be logged")
     ThreadingHTTPServer(("0.0.0.0", args.disco_port), _make_disco(bridge)).serve_forever()
 
 
