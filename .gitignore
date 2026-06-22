@@ -1,0 +1,10 @@
+.env
+backend/config/devices.json
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+dist/
+.DS_Store

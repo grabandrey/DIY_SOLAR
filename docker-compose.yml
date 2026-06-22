@@ -1,0 +1,37 @@
+services:
+  backend:
+    build: ./backend
+    container_name: solar-assistant-backend
+    restart: unless-stopped
+    environment:
+      SA_POLL_INTERVAL: "${SA_POLL_INTERVAL:-2.0}"
+      SA_LOG_LEVEL: "${SA_LOG_LEVEL:-INFO}"
+      # Discovery feed from the host USB bridge (tools/usb_bridge.py). Used on
+      # macOS/Windows where the container can't see host USB directly.
+      SA_BRIDGE_URL: "${SA_BRIDGE_URL:-http://host.docker.internal:5510}"
+    # Lets the container resolve the host on Linux too (automatic on Docker Desktop).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Persists runtime device config (config/devices.json) across restarts.
+      - ./backend/config:/app/config
+      # --- Dynamic USB access (Linux host) ---
+      # Bind the host's whole /dev so devices plugged in AFTER startup are visible
+      # to the backend immediately. No fixed device path => container starts fine
+      # even with nothing plugged in. Devices are then discovered & attached from
+      # the frontend (Settings -> Scan for devices).
+      - /dev:/dev
+    # privileged is the simplest way to allow access to hot-plugged char devices
+    # (ttyUSB*/hidraw*) whose major/minor numbers aren't known ahead of time.
+    privileged: true
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    container_name: solar-assistant-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"

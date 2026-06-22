@@ -1,0 +1,1 @@
+"""Solar Assistant backend package."""

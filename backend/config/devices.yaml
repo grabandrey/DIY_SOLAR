@@ -1,0 +1,18 @@
+# Seed device topology (first run only).
+#
+# After first start this is copied into config/devices.json, which becomes the live
+# source of truth and is managed entirely from the frontend (⚙ Devices): scan for USB
+# ports, attach an inverter/BMS, enable/disable, remove. You normally never edit this.
+#
+# It ships with one simulated inverter so the dashboard shows data with no hardware.
+# Real devices are added from the UI — no ports or env vars to set here.
+
+devices:
+  - id: inverter-mock
+    name: Demo Inverter (simulated)
+    driver: axpert
+    enabled: true
+    transport:
+      type: mock
+      params:
+        jitter: true
