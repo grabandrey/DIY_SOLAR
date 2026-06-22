@@ -344,6 +344,54 @@ def _probe_jk(ser) -> bytes:
     return _read_for(ser, 2.0, stop_on=None)
 
 
+def _jk_dump(path: str, baud: int, seconds: float = 4.0) -> None:
+    """Capture the JK stream for a few seconds and summarize the 0x02 (cell-info) frames.
+
+    Use with ALL packs connected to see how the daisy chain presents multiple BMS — how many
+    distinct cell-info frames appear and their cell voltages.
+    """
+    print(f"Opening {path} @ {baud}, capturing JK stream for {seconds}s ...")
+    try:
+        ser = _open_serial(path, baud, timeout=0.5)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[FAIL] cannot open: {exc}")
+        return
+    try:
+        ser.write(_jk_read_all_frame(0))
+        ser.flush()
+        buf = _read_for(ser, seconds)
+    finally:
+        ser.close()
+    print(f"[i] captured {len(buf)} bytes")
+
+    frames, i = [], buf.find(b"\x55\xaa\xeb\x90")
+    while i != -1:
+        rtype = buf[i + 4] if i + 4 < len(buf) else None
+        frames.append((i, rtype))
+        i = buf.find(b"\x55\xaa\xeb\x90", i + 4)
+    print(f"[i] {len(frames)} JK frames; record types: "
+          f"{sorted(set(t for _, t in frames if t is not None))}")
+
+    seen = []
+    for off, rtype in frames:
+        if rtype != 0x02 or off + 70 > len(buf):
+            continue
+        cells = [int.from_bytes(buf[off + 6 + 2 * k: off + 8 + 2 * k], "little") for k in range(32)]
+        cells = [c for c in cells if c]
+        sig = tuple(round(c, -1) for c in cells)
+        if sig not in [s for s, _ in seen]:
+            seen.append((sig, cells))
+    print(f"[i] {len(seen)} DISTINCT cell-info pack(s) seen:")
+    for n, (_sig, cells) in enumerate(seen, 1):
+        v = sum(cells) / 1000
+        print(f"    pack {n}: {len(cells)} cells, ~{v:.2f} V, cells(mV)={cells}")
+    if len(seen) <= 1:
+        print("[!] only one distinct pack seen. If you have more, they may not broadcast on")
+        print("    this bus (each may need a unique RS485 address, or addressed polling). Paste")
+        print("    this output and the first ~64 bytes below so the multi-pack framing can be set up.")
+        print(f"    head: {buf[:64].hex(' ')}")
+
+
 def _test_serial(path: str, baud: int, protocol: str = "phocos") -> None:
     """Open a serial port and probe it with the protocol for the chosen inverter family.
 
@@ -834,6 +882,9 @@ def main() -> None:
     ap.add_argument("--watch", action="store_true", help="DIAGNOSTIC: live-watch USB plug/unplug events")
     ap.add_argument("--test-serial", metavar="PATH", default=None,
                     help="DIAGNOSTIC: open a serial port, probe the inverter, then exit")
+    ap.add_argument("--jk-dump", metavar="PATH", default=None,
+                    help="DIAGNOSTIC: capture the JK-BMS stream and summarize distinct packs "
+                         "(connect ALL daisy-chained packs first). Use with --baud 115200.")
     ap.add_argument("--protocol", choices=("phocos", "axpert", "growatt", "jk"), default="phocos",
                     help="device family for --test-serial. phocos/axpert = Voltronic ASCII (QPIGS); "
                          "growatt also tries Growatt-SPF Modbus-RTU; jk = JK-BMS 0x4E57 (Modbus fallback).")
@@ -846,6 +897,10 @@ def main() -> None:
 
     if args.test_serial:
         _test_serial(args.test_serial, args.baud, args.protocol)
+        return
+
+    if args.jk_dump:
+        _jk_dump(args.jk_dump, args.baud)
         return
 
     if args.watch:

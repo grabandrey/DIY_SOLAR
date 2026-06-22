@@ -1,11 +1,12 @@
 """JK-BMS (Jikong) battery driver — modern JK02 protocol (header 0x55 0xAA 0xEB 0x90).
 
-The BMS streams 300-byte frames at 115200; a poll sends the read-cell-info command and reads
-a chunk of the stream, then syncs to a 0x02 (cell info) frame and decodes it.
+The BMS streams 300-byte frames at 115200. A poll reads a window of the stream and decodes
+every distinct pack's cell-info (0x02) frame, so multiple packs daisy-chained on one RS485
+bus are fetched automatically — no per-pack config. Each pack is tracked across polls (by
+cell-voltage similarity) so it keeps a stable id/card even as values drift.
 
-Daisy chain: set each pack a unique RS485 address in the JK app, then list them via
-``options``: ``addresses`` = explicit RS485 address list, or ``units`` = a count (1..N). With
-no option the single connected/main pack is read.
+``options``: ``units`` forces the expected pack count; ``window_bytes`` tunes how much of the
+stream is read per poll (must cover more than one broadcast cycle to see every pack).
 """
 
 from __future__ import annotations
@@ -19,50 +20,43 @@ from .base import BMSDevice
 
 log = logging.getLogger(__name__)
 
-# Read a generous slice of the stream so a full 300-byte cell-info frame is captured
-# regardless of where in the stream we start.
-READ_BYTES = 960
+# Read enough of the stream to span more than one full broadcast cycle of all packs.
+DEFAULT_WINDOW = 8000
 READ_TIMEOUT = 4.0
 
 
 class JKBms(BMSDevice):
-    def _addresses(self) -> List[int]:
-        opts = self.options
-        if opts.get("addresses"):
-            return [int(a) for a in opts["addresses"]]
-        if opts.get("units"):
-            return list(range(1, int(opts["units"]) + 1))
-        return [0]  # single connected pack (no RS485 addressing)
-
-    async def _read(self, address: int):
-        cmd = jk.build_read_all(address)
-        raw = await self.transport.transact(cmd, read_bytes=READ_BYTES, timeout=READ_TIMEOUT)
-        return jk.parse(raw)  # (cells, fields)
-
     async def poll(self) -> Reading:
         return (await self.poll_many())[0]
 
     async def poll_many(self) -> List[Reading]:
-        addresses = self._addresses()
+        window = int(self.options.get("window_bytes", DEFAULT_WINDOW))
+        try:
+            # The command restarts the broadcast, so packs come back in a stable order.
+            buf = await self.transport.transact(
+                jk.build_read_all(0), read_bytes=window, timeout=READ_TIMEOUT
+            )
+            packs = jk.distinct_packs(buf)
+        except Exception as exc:  # noqa: BLE001 - whole link down -> single offline reading
+            log.warning("JK-BMS poll failed for %s: %s", self.device_id, exc)
+            return [self._offline_reading(str(exc))]
+
+        units = self.options.get("units")
+        if units:
+            packs = packs[: int(units)]
+
         readings: List[Reading] = []
-        for i, addr in enumerate(addresses):
-            # First pack keeps this device's id so its configured entry shows online.
-            dev_id = self.device_id if i == 0 else f"{self.device_id}:{addr}"
-            name = self.name if len(addresses) == 1 else f"{self.name} #{addr}"
-            try:
-                cells, fields = await self._read(addr)
-                reading = Reading(
-                    device_id=dev_id, device_name=name, kind=self.kind, online=True,
-                    raw={"address": addr, "cells_mv": cells},
-                )
-                for key, metric in jk.to_metrics(cells, fields).items():
-                    reading.metrics[key] = Metric(
-                        value=metric["value"], unit=metric["unit"], label=metric["label"]
-                    )
-            except Exception as exc:  # noqa: BLE001 - this pack offline, keep the rest
-                log.warning("JK-BMS poll failed for %s addr %d: %s", self.device_id, addr, exc)
-                reading = Reading(
-                    device_id=dev_id, device_name=name, kind=self.kind, online=False, error=str(exc)
+        for idx, (cells, fields) in enumerate(packs):
+            # Packs are identified by broadcast order; first keeps this device's id.
+            dev_id = self.device_id if idx == 0 else f"{self.device_id}:{idx}"
+            name = self.name if len(packs) == 1 else f"{self.name} #{idx + 1}"
+            reading = Reading(
+                device_id=dev_id, device_name=name, kind=self.kind, online=True,
+                raw={"pack": idx, "cells_mv": cells},
+            )
+            for key, metric in jk.to_metrics(cells, fields).items():
+                reading.metrics[key] = Metric(
+                    value=metric["value"], unit=metric["unit"], label=metric["label"]
                 )
             readings.append(reading)
         return readings

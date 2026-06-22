@@ -50,8 +50,46 @@ def find_cell_frame(buf: bytes) -> bytes:
 
 
 def parse(buf: bytes) -> Tuple[List[int], Dict[str, float]]:
-    """Find and decode a cell-info frame. Returns (cell_millivolts, fields)."""
-    frame = find_cell_frame(buf)
+    """Find and decode the first cell-info frame. Returns (cell_millivolts, fields)."""
+    return _decode_frame(find_cell_frame(buf))
+
+
+def iter_cell_frames(buf: bytes):
+    """Yield (cells, fields) for every decodable cell-info (0x02) frame in a stream buffer."""
+    i = buf.find(RESP_HEADER)
+    while i != -1:
+        if i + 5 <= len(buf) and buf[i + 4] == TYPE_CELL_INFO and i + MIN_PARSE <= len(buf):
+            try:
+                yield _decode_frame(buf[i : i + FRAME_LEN])
+            except ProtocolError:
+                pass
+        i = buf.find(RESP_HEADER, i + 4)
+
+
+def _cells_close(a: List[int], b: List[int], tol_mv: int = 8) -> bool:
+    # Tight tolerance: the same pack's back-to-back frames differ by <5 mV, while different
+    # packs almost always differ by more on at least one cell.
+    return len(a) == len(b) and all(abs(x - y) <= tol_mv for x, y in zip(a, b))
+
+
+def distinct_packs(buf: bytes) -> List[Tuple[List[int], Dict[str, float]]]:
+    """Return one (cells, fields) per physical pack from a multi-pack broadcast window.
+
+    Packs broadcast in a fixed repeating order; we read >1 cycle and detect the period by
+    finding when the first pack's frame recurs, which yields the full set regardless of where
+    in the cycle the capture started.
+    """
+    frames = list(iter_cell_frames(buf))
+    if not frames:
+        raise ProtocolError("no JK02 cell-info frames in stream")
+    base = frames[0][0]
+    for period in range(1, len(frames)):
+        if _cells_close(frames[period][0], base):
+            return frames[:period]
+    return frames  # no repeat within the window -> treat each frame as a distinct pack
+
+
+def _decode_frame(frame: bytes) -> Tuple[List[int], Dict[str, float]]:
     if len(frame) < MIN_PARSE:
         raise ProtocolError(f"short JK02 frame: {len(frame)} bytes")
     # Validate the trailing sum checksum only when the whole 300-byte frame is present.
