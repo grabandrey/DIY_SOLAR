@@ -302,7 +302,12 @@ def _serial_open_help_linux(path: str, exc: Exception, errno_) -> None:
 def _serial_open_help(path: str, exc: Exception) -> None:
     """Print targeted guidance when a serial open fails (driver / power / busy)."""
     if platform.system() == "Linux":
-        _serial_open_help_linux(path, exc, getattr(exc, "errno", None))
+        errno_ = getattr(exc, "errno", None)
+        if errno_ is None:  # pyserial often wraps the OS error in the message string
+            import re as _re
+            m = _re.search(r"\[Errno (\d+)\]", str(exc))
+            errno_ = int(m.group(1)) if m else None
+        _serial_open_help_linux(path, exc, errno_)
         return
     is_einval = "Invalid argument" in str(exc) or getattr(exc, "errno", None) == 22
     print("    -> The device was found but macOS refused to CONFIGURE the serial port.")
