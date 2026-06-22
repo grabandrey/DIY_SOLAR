@@ -274,8 +274,36 @@ def _open_serial(path: str, baud: int, timeout: float = 0.2):
     raise OSError("; ".join(dict.fromkeys(errors)))
 
 
+def _serial_open_help_linux(path: str, exc: Exception, errno_) -> None:
+    """Linux-specific guidance when opening a serial port fails."""
+    print("    -> Could not open the serial port on Linux.")
+    if errno_ == 13:  # EACCES
+        print("       errno 13 (permission denied): your user can't open the port. Add it to dialout:")
+        print("         sudo usermod -aG dialout $USER     (then log out/in or reboot)")
+    elif errno_ == 16:  # EBUSY
+        print("       errno 16 (busy): another process is holding the port. Usual suspects are")
+        print("       ModemManager and brltty grabbing USB-serial adapters:")
+        print("         sudo systemctl stop ModemManager")
+        print("         sudo apt-get remove brltty")
+    elif errno_ == 5:  # EIO
+        print("       errno 5 (I/O error): the USB link to the adapter is failing. Most common causes:")
+        print("         • POWER: too many USB devices browning out the Pi. Use a POWERED USB hub and")
+        print("           a solid 5V/3A supply. Check under-voltage:  vcgencmd get_throttled  (≠ 0x0 = bad).")
+        print("         • brltty/ModemManager hijacking CP210x/CH340 adapters:")
+        print("           sudo apt-get remove brltty   ;   sudo systemctl stop ModemManager")
+        print("         • Flaky cable / bad CP2102 clone / USB port — replug, try another cable or port.")
+        print("       Kernel detail:  dmesg | tail -30")
+    else:
+        print(f"       errno {errno_}: {exc}")
+        print("       Inspect the kernel log:  dmesg | tail -30")
+    print(f"       Re-test after fixing:  python3 tools/usb_bridge.py --test-serial {path}")
+
+
 def _serial_open_help(path: str, exc: Exception) -> None:
-    """Print targeted guidance when a serial open fails (usually a driver problem)."""
+    """Print targeted guidance when a serial open fails (driver / power / busy)."""
+    if platform.system() == "Linux":
+        _serial_open_help_linux(path, exc, getattr(exc, "errno", None))
+        return
     is_einval = "Invalid argument" in str(exc) or getattr(exc, "errno", None) == 22
     print("    -> The device was found but macOS refused to CONFIGURE the serial port.")
     if is_einval:
