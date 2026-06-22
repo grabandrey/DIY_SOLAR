@@ -74,7 +74,7 @@ except Exception:  # noqa: BLE001
 # advertises whichever of its own LAN IPs this server reaches it on, so the backend connects
 # back to the right host. Set to None to advertise host.docker.internal (bridge + backend on
 # the same machine). Edit this if the backend moves to a different IP.
-SERVER_IP = "192.168.0.79"
+SERVER_IP = "192.168.0.13"
 
 # Port the Solar Assistant backend API listens on (docker-compose maps 8000). The bridge
 # POSTs its discovery URL to http://SERVER_IP:SERVER_API_PORT/api/bridge/register so the
