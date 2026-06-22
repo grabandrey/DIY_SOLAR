@@ -26,9 +26,43 @@ export const api = {
   removeDevice: (id) => req(`/devices/${id}`, { method: "DELETE" }),
 };
 
-function wsUrl() {
+function wsUrl(path = "/ws") {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.host}/ws`;
+  return `${proto}//${window.location.host}${path}`;
+}
+
+// Live discovery feed: ports, configured devices, and connected bridges, pushed by the
+// backend over a WebSocket so the Devices panel refreshes itself without polling.
+export function useDiscovery(active = true) {
+  const [data, setData] = useState({ ports: [], devices: [], bridges: [] });
+  const [connected, setConnected] = useState(false);
+
+  useEffect(() => {
+    if (!active) return undefined;
+    let closed = false;
+    let retry;
+    let ws;
+
+    function connect() {
+      ws = new WebSocket(wsUrl("/ws/discovery"));
+      ws.onopen = () => setConnected(true);
+      ws.onmessage = (event) => setData(JSON.parse(event.data));
+      ws.onclose = () => {
+        setConnected(false);
+        if (!closed) retry = setTimeout(connect, 2000);
+      };
+      ws.onerror = () => ws.close();
+    }
+
+    connect();
+    return () => {
+      closed = true;
+      clearTimeout(retry);
+      ws?.close();
+    };
+  }, [active]);
+
+  return { ...data, connected };
 }
 
 export function useReadings() {
@@ -41,7 +75,7 @@ export function useReadings() {
     let retry;
 
     function connect() {
-      const ws = new WebSocket(wsUrl());
+      const ws = new WebSocket(wsUrl("/ws"));
       wsRef.current = ws;
 
       ws.onopen = () => setConnected(true);

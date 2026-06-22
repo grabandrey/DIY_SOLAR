@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
-import { api } from "../api.js";
+import React, { useEffect, useState } from "react";
+import { api, useDiscovery } from "../api.js";
 
 const BAUDS = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
 const usesBaud = (type) => type === "serial" || type === "tcp";
@@ -23,64 +23,23 @@ function portKey(attach) {
 
 // Modal for discovering USB devices and attaching / managing them at runtime.
 export default function SettingsPanel({ onClose }) {
-  const [devices, setDevices] = useState([]);
-  const [ports, setPorts] = useState([]);
-  const [bridges, setBridges] = useState([]);
+  // Ports, configured devices and bridges stream live from the backend over a WebSocket,
+  // so the panel refreshes itself (plug/unplug, online state) with no polling.
+  const { ports, devices, bridges, connected } = useDiscovery();
   const [drivers, setDrivers] = useState([]);
-  const [scanning, setScanning] = useState(false);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const pollRef = useRef(null);
-
-  async function refreshDevices() {
-    try {
-      setDevices(await api.getDevices());
-    } catch (e) {
-      setError(e.message);
-    }
-  }
-
-  async function scan(silent = false) {
-    if (!silent) setScanning(true);
-    try {
-      setPorts(await api.scanPorts());
-      if (!silent) setError(null);
-    } catch (e) {
-      if (!silent) setError(e.message);
-    } finally {
-      if (!silent) setScanning(false);
-    }
-  }
-
-  async function refreshBridges() {
-    try {
-      setBridges(await api.getBridges());
-    } catch {
-      /* bridges are optional; ignore transient errors */
-    }
-  }
 
   useEffect(() => {
-    refreshDevices();
     api.getDrivers().then(setDrivers).catch((e) => setError(e.message));
-    scan();
-    refreshBridges();
-    // Auto-detect: keep re-scanning + refreshing so plugged/unplugged devices
-    // appear and online state stays current without clicking anything.
-    pollRef.current = setInterval(() => {
-      scan(true);
-      refreshDevices();
-      refreshBridges();
-    }, 3000);
-    return () => clearInterval(pollRef.current);
   }, []);
 
-  async function attach(cfg) {
+  // Device actions still hit REST; the WebSocket reflects the result on its next tick.
+  async function run(fn) {
     setBusy(true);
     setError(null);
     try {
-      await api.addDevice(cfg);
-      await refreshDevices();
+      await fn();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -88,30 +47,12 @@ export default function SettingsPanel({ onClose }) {
     }
   }
 
-  async function toggle(d) {
-    setBusy(true);
-    try {
-      await api.updateDevice(d.id, { enabled: !d.enabled });
-      await refreshDevices();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function remove(d) {
+  const attach = (cfg) => run(() => api.addDevice(cfg));
+  const toggle = (d) => run(() => api.updateDevice(d.id, { enabled: !d.enabled }));
+  const remove = (d) => {
     if (!confirm(`Remove ${d.name}?`)) return;
-    setBusy(true);
-    try {
-      await api.removeDevice(d.id);
-      await refreshDevices();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
+    run(() => api.removeDevice(d.id));
+  };
 
   const attachedKeys = new Set(devices.map((d) => portKey(d.transport)));
 
@@ -182,16 +123,17 @@ export default function SettingsPanel({ onClose }) {
         )}
 
         <div className="scan-head">
-          <h3>Detected ports <span className="muted small">(auto-refreshing)</span></h3>
-          <button disabled={scanning} onClick={() => scan()}>
-            {scanning ? "Scanning…" : "↻ Scan now"}
-          </button>
+          <h3>
+            Detected ports{" "}
+            <span className="muted small">
+              {connected ? "● live" : "○ reconnecting…"}
+            </span>
+          </h3>
         </div>
         {ports.length === 0 && (
           <p className="muted">
-            Nothing detected yet. Plug in a device — it appears here automatically.
-            On macOS/Windows, run the host bridge first:{" "}
-            <code>python3 tools/usb_bridge.py</code>
+            Nothing detected yet. Plug the inverter into the Raspberry Pi running the bridge —
+            it appears here automatically.
           </p>
         )}
         <ul className="port-list">

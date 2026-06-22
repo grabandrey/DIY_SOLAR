@@ -41,6 +41,12 @@ BRIDGE_URL = os.getenv("SA_BRIDGE_URL", "http://host.docker.internal:5510")
 # re-registers well within this window; if it stops (Pi unplugged), it drops off the scan.
 BRIDGE_TTL = float(os.getenv("SA_BRIDGE_TTL", "30"))
 
+# Whether to include serial/HID ports local to the backend process. Off by default: in the
+# typical Docker-on-Mac setup the only real hardware is on a remote bridge (the Pi), and
+# local "ports" are just noise. Set SA_SHOW_LOCAL_PORTS=1 on a Linux host where the inverter
+# is plugged straight into the machine running the backend.
+SHOW_LOCAL_PORTS = os.getenv("SA_SHOW_LOCAL_PORTS", "0").lower() in ("1", "true", "yes")
+
 # url -> last-seen epoch seconds, for bridges that registered themselves.
 _registered: Dict[str, float] = {}
 _lock = threading.Lock()
@@ -85,7 +91,7 @@ def list_bridges() -> List[Dict[str, Any]]:
 
 
 def scan_ports() -> List[Dict[str, Any]]:
-    ports = _scan_local()
+    ports = _scan_local() if SHOW_LOCAL_PORTS else []
     ports.extend(_scan_bridge())
     # De-dupe by (source, path) so a port isn't listed twice.
     seen, unique = set(), []

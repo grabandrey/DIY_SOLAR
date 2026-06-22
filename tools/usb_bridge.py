@@ -30,6 +30,7 @@ Usage:
     python3 tools/usb_bridge.py --all-hid     # bridge every HID device (not just likely)
     python3 tools/usb_bridge.py --hid-vid 0665 --hid-pid 5161   # target a specific HID
     python3 tools/usb_bridge.py --baud 2400  # serial baud (also selectable per-device)
+    python3 tools/usb_bridge.py --test-serial /dev/ttyUSB0 --protocol growatt --baud 9600
 
 Then in the UI: ⚙ Devices -> Scan -> your device appears (source "host USB") ->
 pick the driver (axpert/phocos) -> Attach.
@@ -283,39 +284,99 @@ def _serial_open_help(path: str, exc: Exception) -> None:
     print(f"       • Re-test after fixing:  python3 tools/usb_bridge.py --test-serial {path}")
 
 
-def _test_serial(path: str, baud: int) -> None:
-    """Open a serial port and try one real QPIGS exchange, with verbose results."""
-    print(f"Opening {path} @ {baud} ...")
+def _modbus_crc(data: bytes) -> bytes:
+    """Modbus-RTU CRC-16 (poly 0xA001), returned low-byte-first as it goes on the wire."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return bytes([crc & 0xFF, (crc >> 8) & 0xFF])
+
+
+def _read_for(ser, deadline_s: float, stop_on=None) -> bytes:
+    """Read until `stop_on` byte(s) appear or the deadline passes."""
+    deadline = time.time() + deadline_s
+    buf = b""
+    while time.time() < deadline:
+        chunk = ser.read(128)
+        if chunk:
+            buf += chunk
+        if stop_on and stop_on in buf:
+            break
+    return buf
+
+
+def _probe_voltronic(ser) -> bytes:
+    """Send QPIGS (Axpert/Phocos/Growatt-SPF ASCII) and return the raw reply (or b'')."""
+    ser.write(b"QPIGS\xb7\xa9\r")  # QPIGS + its fixed CRC (0xB7A9) + CR
+    ser.flush()
+    return _read_for(ser, 2.5, stop_on=b"\r")
+
+
+def _probe_modbus(ser) -> bytes:
+    """Send a Growatt-SPF Modbus-RTU read (input regs 0..9, slave 1) and return the reply."""
+    frame = bytes([0x01, 0x04, 0x00, 0x00, 0x00, 0x0A])  # addr, func 0x04, start 0, count 10
+    ser.write(frame + _modbus_crc(frame))
+    ser.flush()
+    return _read_for(ser, 2.0)
+
+
+def _looks_like_modbus_reply(buf: bytes) -> bool:
+    # Echoed slave addr 0x01 + a read/exception function code for func 0x03/0x04.
+    return len(buf) >= 5 and buf[0] == 0x01 and buf[1] in (0x03, 0x04, 0x83, 0x84)
+
+
+def _test_serial(path: str, baud: int, protocol: str = "phocos") -> None:
+    """Open a serial port and probe it with the protocol for the chosen inverter family.
+
+    phocos/axpert  -> Voltronic ASCII (QPIGS).
+    growatt        -> try Voltronic ASCII first, then Growatt-SPF Modbus-RTU, and report
+                      which one the inverter actually answers (SPF 5000 ES units vary).
+    """
+    print(f"Opening {path} @ {baud}  (protocol: {protocol}) ...")
     try:
         ser = _open_serial(path, baud, timeout=1.0)
     except Exception as exc:  # noqa: BLE001
         print(f"[FAIL] cannot open: {exc}")
         _serial_open_help(path, exc)
         return
-    print("[OK] port opened. Sending QPIGS (Voltronic status query)...")
     try:
         try:
             ser.reset_input_buffer()
         except Exception:  # noqa: BLE001
             pass
-        ser.write(b"QPIGS\xb7\xa9\r")  # QPIGS + its fixed CRC (0xB7A9) + CR
-        ser.flush()
-        deadline = time.time() + 2.5
-        buf = b""
-        while time.time() < deadline:
-            chunk = ser.read(128)
-            if chunk:
-                buf += chunk
-            if b"\r" in buf:
-                break
+
+        # 1) Voltronic ASCII (the protocol the backend's axpert/phocos/growatt drivers speak).
+        print("[*] sending QPIGS (Voltronic ASCII)...")
+        buf = _probe_voltronic(ser)
+        if buf.startswith(b"("):
+            print(f"[OK] Voltronic reply ({len(buf)} bytes): {buf[:160]!r}")
+            print("     Valid Voltronic response — attach with the axpert/phocos/growatt driver.")
+            return
         if buf:
-            print(f"[OK] inverter replied with {len(buf)} bytes:")
-            print(f"     {buf[:160]!r}")
-            if buf.startswith(b"("):
-                print("     Looks like a valid Voltronic response — the bridge will work.")
-        else:
-            print("[!] opened fine but no reply. Check baud (try --baud 9600/115200), cable wiring,")
-            print("    and that the inverter's COM/USB port is enabled.")
+            print(f"[?] got {len(buf)} bytes but not a Voltronic frame: {buf[:160]!r}")
+
+        # 2) For Growatt, also try Modbus-RTU — many SPF 5000 ES units speak this, not ASCII.
+        if protocol == "growatt":
+            try:
+                ser.reset_input_buffer()
+            except Exception:  # noqa: BLE001
+                pass
+            print("[*] sending Growatt-SPF Modbus-RTU read (func 0x04, regs 0-9)...")
+            mb = _probe_modbus(ser)
+            if _looks_like_modbus_reply(mb):
+                print(f"[OK] Modbus-RTU reply ({len(mb)} bytes): {mb.hex(' ')}")
+                print("     Your SPF 5000 ES speaks Modbus-RTU, NOT Voltronic ASCII.")
+                print(f"     => Use baud {baud}. The current growatt driver is ASCII-only, so it")
+                print("        needs a Modbus driver/transport to read this inverter (see notes).")
+                return
+            if mb:
+                print(f"[?] got {len(mb)} bytes, not a clean Modbus frame: {mb.hex(' ')}")
+
+        print("[!] no usable reply. Try other bauds (--baud 9600/2400/115200), and make sure no")
+        print("    other master (ShineWiFi/ShineLAN dongle, ShinePhone/ShineBus app) is connected —")
+        print("    only one device can poll the inverter at a time.")
     finally:
         ser.close()
 
@@ -737,7 +798,10 @@ def main() -> None:
     ap.add_argument("--list-usb", action="store_true", help="DIAGNOSTIC: list all USB/HID devices and exit")
     ap.add_argument("--watch", action="store_true", help="DIAGNOSTIC: live-watch USB plug/unplug events")
     ap.add_argument("--test-serial", metavar="PATH", default=None,
-                    help="DIAGNOSTIC: open a serial port and try one QPIGS exchange, then exit")
+                    help="DIAGNOSTIC: open a serial port, probe the inverter, then exit")
+    ap.add_argument("--protocol", choices=("phocos", "axpert", "growatt"), default="phocos",
+                    help="inverter family for --test-serial. phocos/axpert = Voltronic ASCII (QPIGS); "
+                         "growatt also tries Growatt-SPF Modbus-RTU if ASCII is silent.")
     ap.add_argument("--list", action="store_true", help=argparse.SUPPRESS)  # back-compat
     args = ap.parse_args()
 
@@ -746,7 +810,7 @@ def main() -> None:
         return
 
     if args.test_serial:
-        _test_serial(args.test_serial, args.baud)
+        _test_serial(args.test_serial, args.baud, args.protocol)
         return
 
     if args.watch:

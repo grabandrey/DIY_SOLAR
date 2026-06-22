@@ -139,6 +139,31 @@ async def reading_for(device_id: str) -> dict:
     return {"reading": bus.latest_for(device_id)}
 
 
+@app.websocket("/ws/discovery")
+async def ws_discovery(websocket: WebSocket) -> None:
+    """Push the discovery snapshot (ports + devices + bridges) on an interval so the
+    Devices panel stays live over a WebSocket instead of HTTP-polling."""
+    await websocket.accept()
+    try:
+        while True:
+            mgr = manager
+            if mgr is not None:
+                # scan_ports() does blocking bridge HTTP; keep the event loop free.
+                payload = await asyncio.to_thread(
+                    lambda: {
+                        "ports": mgr.list_ports(),
+                        "devices": mgr.list_devices(),
+                        "bridges": list_bridges(),
+                    }
+                )
+                await websocket.send_json(payload)
+            await asyncio.sleep(settings.poll_interval)
+    except WebSocketDisconnect:
+        pass
+    except asyncio.CancelledError:
+        raise
+
+
 @app.websocket("/ws")
 async def ws(websocket: WebSocket) -> None:
     await websocket.accept()
