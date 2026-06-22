@@ -83,13 +83,13 @@ class SerialTransport(Transport):
             if timeout is not None:
                 self._serial.timeout = self.timeout
 
-    async def collect(self, payload: bytes, *, duration: float, max_bytes: int = 65536) -> bytes:
+    async def collect(self, payload: bytes, *, duration: float, max_bytes: int = 65536, until=None) -> bytes:
         async with self._lock:
             if not self._serial or not self._serial.is_open:
                 await self.open()
-            return await asyncio.to_thread(self._collect_blocking, payload, duration, max_bytes)
+            return await asyncio.to_thread(self._collect_blocking, payload, duration, max_bytes, until)
 
-    def _collect_blocking(self, payload: bytes, duration: float, max_bytes: int) -> bytes:
+    def _collect_blocking(self, payload: bytes, duration: float, max_bytes: int, until) -> bytes:
         import time as _time
         assert self._serial is not None
         old = self._serial.timeout
@@ -104,6 +104,8 @@ class SerialTransport(Transport):
                 chunk = self._serial.read(4096)
                 if chunk:
                     buf += chunk
+                    if until and until(bytes(buf)):
+                        break
             return bytes(buf)
         finally:
             self._serial.timeout = old

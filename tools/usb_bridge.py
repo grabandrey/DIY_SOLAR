@@ -42,6 +42,7 @@ import argparse
 import glob
 import json
 import logging
+import os
 import platform
 import socket
 import subprocess
@@ -154,6 +155,25 @@ def _register_loop(feed_url: str, interval: float = 10.0) -> None:
 def _looks_like_inverter(*fields) -> bool:
     blob = " ".join(str(x).lower() for x in fields if x)
     return any(h in blob for h in _INVERTER_HINTS)
+
+
+def _stable_serial_path(device: str) -> str:
+    """Return the stable /dev/serial/by-id/* symlink for a /dev/ttyUSB* node.
+
+    The kernel assigns ttyUSB numbers in enumeration order, so they reshuffle on reboot or
+    replug. The by-id link is keyed by the adapter's serial number and never changes, so we
+    use it as the device's identity and open it instead of the volatile ttyUSBN path.
+    """
+    byid = "/dev/serial/by-id"
+    try:
+        target = os.path.realpath(device)
+        for name in sorted(os.listdir(byid)):
+            link = os.path.join(byid, name)
+            if os.path.realpath(link) == target:
+                return link
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        pass
+    return device
 
 
 # ---------------------------------------------------------------------------
@@ -468,26 +488,58 @@ def _test_serial(path: str, baud: int, protocol: str = "phocos") -> None:
 class Bridge:
     """Tracks detected devices (serial + HID) and runs a TCP relay for each."""
 
+    _PORT_MAP_FILE = os.path.expanduser("~/.solar_usb_bridge_ports.json")
+
     def __init__(self, baud, base_port, advertise_host, all_hid, vid_filter, pid_filter):
         self.baud = baud
+        self.base_port = base_port
         self.advertise_host = advertise_host
         self.all_hid = all_hid
         self.vid_filter = vid_filter
         self.pid_filter = pid_filter
         self.lock = threading.Lock()
         self.devices: dict[str, dict] = {}  # id -> {kind, tcp_port, info, present, target}
-        self._next_port = base_port
+        # Persistent stable_id -> tcp_port map so each physical device keeps the same TCP
+        # port across restarts (the backend's attach config points at host:port).
+        self._port_map: dict[str, int] = self._load_port_map()
+
+    def _load_port_map(self) -> dict:
+        try:
+            with open(self._PORT_MAP_FILE, "r") as fh:
+                return {k: int(v) for k, v in json.load(fh).items()}
+        except (FileNotFoundError, ValueError, OSError):
+            return {}
+
+    def _save_port_map(self) -> None:
+        try:
+            with open(self._PORT_MAP_FILE, "w") as fh:
+                json.dump(self._port_map, fh)
+        except OSError as exc:  # noqa: BLE001
+            log.warning("could not persist port map: %s", exc)
+
+    def _port_for(self, dev_id: str) -> int:
+        """Return the device's permanent TCP port, assigning the next free one if new."""
+        if dev_id in self._port_map:
+            return self._port_map[dev_id]
+        used = set(self._port_map.values())
+        port = self.base_port
+        while port in used:
+            port += 1
+        self._port_map[dev_id] = port
+        self._save_port_map()
+        return port
 
     # --- detection -------------------------------------------------------
     def scan(self) -> None:
         found: dict[str, dict] = {}
 
         for p in list_ports.comports():
-            found[f"serial:{p.device}"] = {
+            stable = _stable_serial_path(p.device)
+            found[f"serial:{stable}"] = {
                 "kind": "serial",
-                "target": p.device,
+                "target": stable,
                 "info": {
-                    "path": p.device,
+                    "path": stable,
                     "description": p.description or "",
                     "manufacturer": getattr(p, "manufacturer", None),
                     "vid": f"{p.vid:04x}" if p.vid else None,
@@ -515,8 +567,7 @@ class Bridge:
         with self.lock:
             for dev_id, d in found.items():
                 if dev_id not in self.devices:
-                    tcp_port = self._next_port
-                    self._next_port += 1
+                    tcp_port = self._port_for(dev_id)
                     self.devices[dev_id] = {**d, "tcp_port": tcp_port, "present": True}
                     self._start_listener(dev_id, tcp_port)
                     log.info("detected %s %s -> tcp %d", d["kind"], d["info"]["path"], tcp_port)

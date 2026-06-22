@@ -22,8 +22,10 @@ log = logging.getLogger(__name__)
 
 # The JK streams at its own (slow) pace, so we read for a fixed DURATION and take whatever
 # arrived rather than a fixed byte count (which would time out). The window must span more
-# than one full broadcast cycle to capture every pack at least once.
-DEFAULT_WINDOW_SECONDS = 5.0
+# than one full broadcast cycle to capture every pack at least once — but it also caps how
+# fast the JK can update, so keep it as short as still captures all packs. Per-device
+# override: options {"window_seconds": N}. Reads end early once max_bytes is hit.
+DEFAULT_WINDOW_SECONDS = 4.0
 MAX_WINDOW_BYTES = 16000
 
 
@@ -34,20 +36,19 @@ class JKBms(BMSDevice):
     async def poll_many(self) -> List[Reading]:
         duration = float(self.options.get("window_seconds", DEFAULT_WINDOW_SECONDS))
         max_bytes = int(self.options.get("window_bytes", MAX_WINDOW_BYTES))
-        packs, last = None, None
-        for attempt in range(2):
-            try:
-                buf = await self.transport.collect(
-                    jk.build_read_all(0), duration=duration, max_bytes=max_bytes
-                )
-                packs = jk.distinct_packs(buf)
-                break
-            except Exception as exc:  # noqa: BLE001
-                last = exc
-                await self.transport.close()  # reconnect to resync the stream
-        if packs is None:
-            log.warning("JK-BMS poll failed for %s: %s", self.device_id, last)
-            return [self._offline_reading(str(last))]
+        # Single read on the persistent connection — do NOT reconnect on a hiccup; closing
+        # the socket makes the bridge reopen the serial port and disrupts the JK stream
+        # (which then causes more failures). Transient misses are smoothed by the poller's
+        # offline-debounce, so we just report this poll as failed and keep the connection.
+        try:
+            buf = await self.transport.collect(
+                jk.build_read_all(0), duration=duration, max_bytes=max_bytes,
+                until=jk.cycle_complete,  # stop as soon as every pack has been seen once
+            )
+            packs = jk.distinct_packs(buf)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("JK-BMS poll failed for %s: %s", self.device_id, exc)
+            return [self._offline_reading(str(exc))]
 
         units = self.options.get("units")
         if units:

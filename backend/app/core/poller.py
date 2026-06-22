@@ -28,6 +28,13 @@ class Poller:
         # device_id -> every reading id it last published (a parallel master fans out to
         # several), so we can clear them all from the bus on removal / when a unit drops.
         self._reading_ids: Dict[str, Set[str]] = {}
+        # Debounce: last good readings + consecutive failure count per device, so a single
+        # transient read miss doesn't flap the UI offline. We keep showing the last-good
+        # reading until GRACE consecutive failures.
+        self._last_good: Dict[str, list] = {}
+        self._fails: Dict[str, int] = {}
+
+    GRACE_FAILURES = 5
 
     def add(self, device: Device) -> None:
         """Start polling a device. Replaces any existing device with the same id."""
@@ -45,6 +52,8 @@ class Poller:
             asyncio.create_task(self._safe_close(device))
         for rid in self._reading_ids.pop(device_id, {device_id}):
             bus.remove(rid)
+        self._last_good.pop(device_id, None)
+        self._fails.pop(device_id, None)
 
     async def stop(self) -> None:
         for task in self._tasks.values():
@@ -68,25 +77,48 @@ class Poller:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                log.warning("Connect failed for %s: %s", device.device_id, exc)
-                await bus.publish(device._offline_reading(f"connect failed: {exc}"))
+                await self._on_failure(device, f"connect failed: {exc}")
                 await asyncio.sleep(min(self.interval * 3, 15))
                 continue
 
             try:
                 readings = await device.poll_many()
-                new_ids: Set[str] = set()
-                for reading in readings:
-                    await bus.publish(reading)
-                    new_ids.add(reading.device_id)
-                # Clear readings from units that disappeared since the last poll.
-                for stale in self._reading_ids.get(device.device_id, set()) - new_ids:
-                    bus.remove(stale)
-                self._reading_ids[device.device_id] = new_ids
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
-                log.exception("Unexpected poll error for %s", device.device_id)
-                await bus.publish(device._offline_reading(str(exc)))
+                await self._on_failure(device, str(exc))
+                await asyncio.sleep(self.interval)
+                continue
+
+            if any(r.online for r in readings):
+                self._fails[device.device_id] = 0
+                self._last_good[device.device_id] = readings
+                await self._emit(device, readings)
+            else:
+                # Poll returned but the device reported itself offline/errored.
+                err = next((r.error for r in readings if r.error), "no data")
+                await self._on_failure(device, err)
 
             await asyncio.sleep(self.interval)
+
+    async def _on_failure(self, device: Device, error: str) -> None:
+        """Count a failure; keep showing the last-good reading until GRACE is exceeded."""
+        did = device.device_id
+        self._fails[did] = self._fails.get(did, 0) + 1
+        last = self._last_good.get(did)
+        if last and self._fails[did] <= self.GRACE_FAILURES:
+            log.debug("transient failure %d for %s (%s); holding last-good",
+                      self._fails[did], did, error)
+            await self._emit(device, last)  # re-publish last-good, stays online
+        else:
+            log.warning("device %s offline after %d failures: %s", did, self._fails[did], error)
+            await bus.publish(device._offline_reading(error))
+
+    async def _emit(self, device: Device, readings: list) -> None:
+        new_ids: Set[str] = set()
+        for reading in readings:
+            await bus.publish(reading)
+            new_ids.add(reading.device_id)
+        for stale in self._reading_ids.get(device.device_id, set()) - new_ids:
+            bus.remove(stale)
+        self._reading_ids[device.device_id] = new_ids

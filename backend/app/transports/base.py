@@ -50,11 +50,12 @@ class Transport(abc.ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not support framed reads")
 
-    async def collect(self, payload: bytes, *, duration: float, max_bytes: int = 65536) -> bytes:
-        """Write ``payload``, then read whatever arrives for ``duration`` seconds.
+    async def collect(self, payload: bytes, *, duration: float, max_bytes: int = 65536, until=None) -> bytes:
+        """Write ``payload``, then read whatever arrives for up to ``duration`` seconds.
 
         For devices that stream at their own pace (e.g. JK-BMS broadcasts) where a fixed-size
-        read would time out. Returns the accumulated bytes (possibly fewer than max_bytes).
+        read would time out. Stops early when ``until(buf)`` returns True (e.g. a full data
+        cycle captured) or ``max_bytes`` is reached. Returns the accumulated bytes.
         """
         raise NotImplementedError(f"{type(self).__name__} does not support streaming reads")
 

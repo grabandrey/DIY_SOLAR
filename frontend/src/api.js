@@ -65,6 +65,26 @@ export function useDiscovery(active = true) {
   return { ...data, connected };
 }
 
+// Accumulate a live rolling time-series by sampling `sample()` on an interval. The backend
+// keeps only latest readings (no history store), so the dashboard chart is built from the
+// session's samples.
+export function useTimeSeries(sample, { intervalMs = 2000, maxPoints = 16 } = {}) {
+  const [series, setSeries] = useState([]);
+  const ref = useRef(sample);
+  ref.current = sample;
+  useEffect(() => {
+    const tick = () => {
+      const v = ref.current?.();
+      if (!v) return;
+      setSeries((s) => [...s, { t: Date.now(), ...v }].slice(-maxPoints));
+    };
+    tick();
+    const id = setInterval(tick, intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs, maxPoints]);
+  return series;
+}
+
 export function useReadings() {
   const [readings, setReadings] = useState({});
   const [connected, setConnected] = useState(false);

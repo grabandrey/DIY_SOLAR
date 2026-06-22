@@ -72,6 +72,16 @@ def _cells_close(a: List[int], b: List[int], tol_mv: int = 8) -> bool:
     return len(a) == len(b) and all(abs(x - y) <= tol_mv for x, y in zip(a, b))
 
 
+def cycle_complete(buf: bytes) -> bool:
+    """True once the first pack's cell-info frame recurs — i.e. a full broadcast cycle has
+    been captured, so every pack has been seen and we can stop reading early."""
+    frames = list(iter_cell_frames(buf))
+    if len(frames) < 2:
+        return False
+    base = frames[0][0]
+    return any(_cells_close(frames[i][0], base) for i in range(1, len(frames)))
+
+
 def distinct_packs(buf: bytes) -> List[Tuple[List[int], Dict[str, float]]]:
     """Return one (cells, fields) per physical pack from a multi-pack broadcast window.
 
@@ -83,10 +93,14 @@ def distinct_packs(buf: bytes) -> List[Tuple[List[int], Dict[str, float]]]:
     if not frames:
         raise ProtocolError("no JK02 cell-info frames in stream")
     base = frames[0][0]
+    packs = frames
     for period in range(1, len(frames)):
         if _cells_close(frames[period][0], base):
-            return frames[:period]
-    return frames  # no repeat within the window -> treat each frame as a distinct pack
+            packs = frames[:period]
+            break
+    # Deterministic order so a pack keeps the same card across polls regardless of where in
+    # the broadcast the capture started (more cells first, then highest total voltage).
+    return sorted(packs, key=lambda p: (-len(p[0]), -sum(p[0])))
 
 
 def _decode_frame(frame: bytes) -> Tuple[List[int], Dict[str, float]]:

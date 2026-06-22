@@ -105,7 +105,7 @@ class TcpTransport(Transport):
                 await self.close()
                 raise
 
-    async def collect(self, payload: bytes, *, duration: float, max_bytes: int = 65536) -> bytes:
+    async def collect(self, payload: bytes, *, duration: float, max_bytes: int = 65536, until=None) -> bytes:
         async with self._lock:
             if not self._writer or self._writer.is_closing():
                 await self.open()
@@ -127,6 +127,8 @@ class TcpTransport(Transport):
                     if not chunk:
                         break
                     buf += chunk
+                    if until and until(bytes(buf)):
+                        break
                 return bytes(buf)
             except Exception:
                 await self.close()
