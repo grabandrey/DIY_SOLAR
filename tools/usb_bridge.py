@@ -327,12 +327,31 @@ def _looks_like_modbus_reply(buf: bytes) -> bool:
     return len(buf) >= 5 and buf[0] == 0x01 and buf[1] in (0x03, 0x04, 0x83, 0x84)
 
 
+def _jk_read_all_frame(address: int = 0) -> bytes:
+    """JK-BMS 0x4E 0x57 'read all' request (4-byte sum checksum)."""
+    body = bytes([(address >> 24) & 0xFF, (address >> 16) & 0xFF, (address >> 8) & 0xFF,
+                  address & 0xFF, 0x06, 0x03, 0x00, 0x00, 0, 0, 0, 0, 0x68])
+    frame = bytearray(b"\x4e\x57")
+    frame += (2 + len(body) + 4).to_bytes(2, "big")
+    frame += body
+    frame += (sum(frame) & 0xFFFFFFFF).to_bytes(4, "big")
+    return bytes(frame)
+
+
+def _probe_jk(ser) -> bytes:
+    """Send a JK-BMS 'read all' and return the raw reply (a JK frame starts 0x4E 0x57)."""
+    ser.write(_jk_read_all_frame(0))
+    ser.flush()
+    return _read_for(ser, 2.0, stop_on=None)
+
+
 def _test_serial(path: str, baud: int, protocol: str = "phocos") -> None:
     """Open a serial port and probe it with the protocol for the chosen inverter family.
 
     phocos/axpert  -> Voltronic ASCII (QPIGS).
     growatt        -> try Voltronic ASCII first, then Growatt-SPF Modbus-RTU, and report
                       which one the inverter actually answers (SPF 5000 ES units vary).
+    jk             -> JK-BMS 0x4E 0x57 'read all'; also tries Modbus-RTU as a fallback.
     """
     print(f"Opening {path} @ {baud}  (protocol: {protocol}) ...")
     try:
@@ -346,6 +365,31 @@ def _test_serial(path: str, baud: int, protocol: str = "phocos") -> None:
             ser.reset_input_buffer()
         except Exception:  # noqa: BLE001
             pass
+
+        if protocol == "jk":
+            print("[*] sending JK-BMS read-all (0x4E 0x57)...")
+            buf = _probe_jk(ser)
+            if buf.startswith(b"\x4e\x57"):
+                print(f"[OK] JK reply ({len(buf)} bytes): {buf[:32].hex(' ')}...")
+                print(f"     Valid JK frame — attach with the 'jk' driver at baud {baud}.")
+                return
+            if buf:
+                print(f"[?] got {len(buf)} bytes, not a JK frame: {buf[:32].hex(' ')}")
+                print("     If this repeats at every baud, the BMS may be in Modbus mode.")
+            # fall through to a Modbus probe in case the RS485 port is Modbus, not 0x4E57
+            try:
+                ser.reset_input_buffer()
+            except Exception:  # noqa: BLE001
+                pass
+            print("[*] trying Modbus-RTU read as a fallback...")
+            mb = _probe_modbus(ser)
+            if _looks_like_modbus_reply(mb):
+                print(f"[OK] Modbus reply ({len(mb)} bytes): {mb.hex(' ')}")
+                print("     This JK speaks Modbus-RTU on RS485, not 0x4E57 — needs a JK-Modbus driver.")
+                return
+            print("[!] no usable reply. Sweep bauds (JK is usually 115200): "
+                  "--baud 115200 / 9600. Check RS485 A/B wiring and that only one master is on the bus.")
+            return
 
         # 1) Voltronic ASCII (the protocol the backend's axpert/phocos/growatt drivers speak).
         print("[*] sending QPIGS (Voltronic ASCII)...")
@@ -799,9 +843,9 @@ def main() -> None:
     ap.add_argument("--watch", action="store_true", help="DIAGNOSTIC: live-watch USB plug/unplug events")
     ap.add_argument("--test-serial", metavar="PATH", default=None,
                     help="DIAGNOSTIC: open a serial port, probe the inverter, then exit")
-    ap.add_argument("--protocol", choices=("phocos", "axpert", "growatt"), default="phocos",
-                    help="inverter family for --test-serial. phocos/axpert = Voltronic ASCII (QPIGS); "
-                         "growatt also tries Growatt-SPF Modbus-RTU if ASCII is silent.")
+    ap.add_argument("--protocol", choices=("phocos", "axpert", "growatt", "jk"), default="phocos",
+                    help="device family for --test-serial. phocos/axpert = Voltronic ASCII (QPIGS); "
+                         "growatt also tries Growatt-SPF Modbus-RTU; jk = JK-BMS 0x4E57 (Modbus fallback).")
     ap.add_argument("--list", action="store_true", help=argparse.SUPPRESS)  # back-compat
     args = ap.parse_args()
 

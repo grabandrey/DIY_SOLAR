@@ -63,3 +63,48 @@ class SerialTransport(Transport):
         self._serial.write(payload)
         self._serial.flush()
         return self._serial.read_until(terminator)
+
+    async def transact(self, payload: bytes, *, read_bytes: int, timeout: Optional[float] = None) -> bytes:
+        async with self._lock:
+            if not self._serial or not self._serial.is_open:
+                await self.open()
+            return await asyncio.to_thread(self._transact_blocking, payload, read_bytes, timeout)
+
+    def _transact_blocking(self, payload: bytes, read_bytes: int, timeout: Optional[float]) -> bytes:
+        assert self._serial is not None
+        if timeout is not None:
+            self._serial.timeout = timeout
+        try:
+            self._serial.reset_input_buffer()
+            self._serial.write(payload)
+            self._serial.flush()
+            return self._serial.read(read_bytes)
+        finally:
+            if timeout is not None:
+                self._serial.timeout = self.timeout
+
+    async def transact_framed(self, payload: bytes, *, header_len: int, frame_len, timeout=None) -> bytes:
+        async with self._lock:
+            if not self._serial or not self._serial.is_open:
+                await self.open()
+            return await asyncio.to_thread(
+                self._transact_framed_blocking, payload, header_len, frame_len, timeout
+            )
+
+    def _transact_framed_blocking(self, payload, header_len, frame_len, timeout) -> bytes:
+        assert self._serial is not None
+        if timeout is not None:
+            self._serial.timeout = timeout
+        try:
+            self._serial.reset_input_buffer()
+            self._serial.write(payload)
+            self._serial.flush()
+            header = self._serial.read(header_len)
+            if len(header) < header_len:
+                return header
+            total = frame_len(header)
+            rest = self._serial.read(total - header_len) if total > header_len else b""
+            return header + rest
+        finally:
+            if timeout is not None:
+                self._serial.timeout = self.timeout

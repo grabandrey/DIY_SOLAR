@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict
+from typing import Dict, Set
 
 from ..devices.base import Device
 from .bus import bus
@@ -25,6 +25,9 @@ class Poller:
         self.interval = interval
         self._tasks: Dict[str, asyncio.Task] = {}
         self._devices: Dict[str, Device] = {}
+        # device_id -> every reading id it last published (a parallel master fans out to
+        # several), so we can clear them all from the bus on removal / when a unit drops.
+        self._reading_ids: Dict[str, Set[str]] = {}
 
     def add(self, device: Device) -> None:
         """Start polling a device. Replaces any existing device with the same id."""
@@ -40,7 +43,8 @@ class Poller:
             task.cancel()
         if device:
             asyncio.create_task(self._safe_close(device))
-        bus.remove(device_id)
+        for rid in self._reading_ids.pop(device_id, {device_id}):
+            bus.remove(rid)
 
     async def stop(self) -> None:
         for task in self._tasks.values():
@@ -70,8 +74,15 @@ class Poller:
                 continue
 
             try:
-                reading = await device.poll()
-                await bus.publish(reading)
+                readings = await device.poll_many()
+                new_ids: Set[str] = set()
+                for reading in readings:
+                    await bus.publish(reading)
+                    new_ids.add(reading.device_id)
+                # Clear readings from units that disappeared since the last poll.
+                for stale in self._reading_ids.get(device.device_id, set()) - new_ids:
+                    bus.remove(stale)
+                self._reading_ids[device.device_id] = new_ids
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001

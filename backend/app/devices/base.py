@@ -16,7 +16,7 @@ import abc
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 class DeviceKind(str, Enum):
@@ -94,6 +94,16 @@ class Device(abc.ABC):
     async def poll(self) -> Reading:
         """Query the hardware and return a normalized :class:`Reading`."""
         raise NotImplementedError
+
+    async def poll_many(self) -> List[Reading]:
+        """Return one or more readings for a single physical connection.
+
+        Most devices map to one reading (the default). Drivers for inverters wired in
+        parallel override this to report each unit as its own reading (own device_id),
+        so every inverter in the stack shows up separately. The first reading reuses this
+        device's id (so its configured entry shows online); extras use derived ids.
+        """
+        return [await self.poll()]
 
     def _offline_reading(self, error: str) -> Reading:
         return Reading(

@@ -68,3 +68,51 @@ class TcpTransport(Transport):
                 # Drop the connection so the next poll reconnects cleanly.
                 await self.close()
                 raise
+
+    async def transact(self, payload: bytes, *, read_bytes: int, timeout: Optional[float] = None) -> bytes:
+        async with self._lock:
+            if not self._writer or self._writer.is_closing():
+                await self.open()
+            try:
+                assert self._writer and self._reader
+                await self._drain_input()
+                self._writer.write(payload)
+                await self._writer.drain()
+                return await asyncio.wait_for(
+                    self._reader.readexactly(read_bytes), timeout or self.timeout
+                )
+            except Exception:
+                await self.close()
+                raise
+
+    async def transact_framed(self, payload: bytes, *, header_len: int, frame_len, timeout=None) -> bytes:
+        async with self._lock:
+            if not self._writer or self._writer.is_closing():
+                await self.open()
+            try:
+                assert self._writer and self._reader
+                await self._drain_input()
+                self._writer.write(payload)
+                await self._writer.drain()
+                to = timeout or self.timeout
+                header = await asyncio.wait_for(self._reader.readexactly(header_len), to)
+                total = frame_len(header)
+                rest = b""
+                if total > header_len:
+                    rest = await asyncio.wait_for(self._reader.readexactly(total - header_len), to)
+                return header + rest
+            except Exception:
+                await self.close()
+                raise
+
+    async def _drain_input(self) -> None:
+        """Discard any bytes left buffered from a previous (late) reply so reads stay
+        framed — important when polling several Modbus slaves over one connection."""
+        assert self._reader
+        try:
+            while True:
+                leftover = await asyncio.wait_for(self._reader.read(512), 0.005)
+                if not leftover:
+                    break
+        except asyncio.TimeoutError:
+            pass

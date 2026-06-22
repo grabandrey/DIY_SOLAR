@@ -26,6 +26,30 @@ class Transport(abc.ABC):
         """Write ``payload`` and read a response up to ``expect_terminator``."""
         ...
 
+    async def transact(self, payload: bytes, *, read_bytes: int, timeout: float | None = None) -> bytes:
+        """Write ``payload`` and read exactly ``read_bytes`` back.
+
+        For length-framed protocols (e.g. Modbus-RTU) that have no terminator byte. A
+        per-call ``timeout`` overrides the transport default (used for fast device probes).
+        Transports that can't do fixed-length reads raise NotImplementedError.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support fixed-length reads")
+
+    async def transact_framed(
+        self,
+        payload: bytes,
+        *,
+        header_len: int,
+        frame_len,
+        timeout: float | None = None,
+    ) -> bytes:
+        """Write ``payload``, read ``header_len`` bytes, then read the rest of the frame.
+
+        ``frame_len(header)`` returns the total frame length from the header. For protocols
+        whose reply length is encoded in a header field (e.g. JK-BMS). Returns the full frame.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support framed reads")
+
 
 def build_transport(config: Dict[str, Any]) -> Transport:
     """Factory: build a transport from a config dict.

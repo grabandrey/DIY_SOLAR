@@ -22,7 +22,7 @@ from ..config import settings
 from .bus import bus
 from .ports import scan_ports
 from .poller import Poller
-from .registry import DRIVERS, build_device
+from .registry import DRIVERS, build_device, list_public_drivers
 
 log = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ class DeviceManager:
         return scan_ports()
 
     def list_drivers(self) -> List[str]:
-        return sorted(DRIVERS)
+        return list_public_drivers()
 
     # --- mutations (called from the API) ---------------------------------
     async def add_device(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
