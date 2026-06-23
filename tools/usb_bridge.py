@@ -883,7 +883,12 @@ class _TunnelClient:
             try:
                 ws.send(json.dumps(frame))
             except Exception:  # noqa: BLE001
-                pass
+                # Send failed => the socket is dead. Close it so the blocking recv() in
+                # run_forever() unblocks and the connection is re-established.
+                try:
+                    ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _drop(self, ch: int) -> None:
         self.channels.pop(ch, None)
@@ -897,7 +902,15 @@ class _TunnelClient:
         while True:
             stop = threading.Event()
             try:
-                self.ws = _ws.create_connection(self.ws_url, timeout=10)
+                # `timeout` applies to the connect handshake only; enable_multithread lets
+                # the ports-sender thread and this recv loop share the socket safely.
+                self.ws = _ws.create_connection(
+                    self.ws_url, timeout=15, enable_multithread=True
+                )
+                # Block in recv() indefinitely instead of timing out during idle periods
+                # (the backend only sends frames when opening a device channel). Liveness is
+                # covered by the 5s ports heartbeat, which closes the socket if a send fails.
+                self.ws.settimeout(None)
                 self._send({"t": "hello", "bridge": self.bridge_id})
                 log.info("tunnel connected to %s (bridge id %s)", self.ws_url, self.bridge_id)
                 threading.Thread(target=self._ports_sender, args=(stop,), daemon=True).start()
