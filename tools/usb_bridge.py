@@ -455,6 +455,74 @@ def _jk_dump(path: str, baud: int, seconds: float = 4.0) -> None:
     print("    that's the RS485 address. Paste this whole block.")
 
 
+def _identify_one(path: str):
+    """Probe one serial port across the known device families; return a match or None.
+
+    Tries the most distinctive protocols first (JK header, Voltronic '(', Growatt Modbus)
+    each at its standard baud, so a port is recognised by what actually answers.
+    """
+    attempts = [
+        ("JK-BMS", "jk", 115200, _probe_jk, lambda b: b"\x55\xaa\xeb\x90" in b),
+        ("Voltronic inverter (Axpert/Phocos)", "axpert", 2400, _probe_voltronic,
+         lambda b: b.startswith(b"(")),
+        ("Growatt SPF (Modbus)", "growatt_spf_modbus", 9600, _probe_modbus,
+         _looks_like_modbus_reply),
+    ]
+    for label, driver, baud, prober, detector in attempts:
+        try:
+            ser = _open_serial(path, baud, timeout=1.0)
+        except Exception:  # noqa: BLE001  (busy/permission/missing driver -> skip this baud)
+            continue
+        try:
+            try:
+                ser.reset_input_buffer()
+            except Exception:  # noqa: BLE001
+                pass
+            buf = prober(ser)
+        except Exception:  # noqa: BLE001
+            buf = b""
+        finally:
+            try:
+                ser.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if buf and detector(buf):
+            return {"label": label, "driver": driver, "baud": baud, "sample": bytes(buf[:24])}
+    return None
+
+
+def _identify() -> None:
+    """Probe every USB serial port and print a 'which device is on which port' table."""
+    if list_ports is None:
+        print("pyserial not available.")
+        return
+    ports = [p for p in list_ports.comports() if not p.device.startswith("/dev/ttyS")]
+    if not ports:
+        print("No USB serial ports found.")
+        return
+    print(f"Identifying {len(ports)} serial port(s) — a few seconds each.")
+    print("(Run this before attaching devices in the app, so the ports aren't already busy.)\n")
+    for p in sorted(ports, key=lambda x: x.device):
+        stable = _stable_serial_path(p.device)
+        chip = ""
+        if p.vid and p.pid:
+            hint = _serial_chip_hint(p.vid, p.pid)
+            chip = hint[0] if hint else (p.description or "")
+        found = _identify_one(p.device)
+        print(f"== {p.device}  ({chip or p.description or '?'})")
+        if stable != p.device:
+            print(f"   stable path : {stable}")
+        if found:
+            print(f"   DEVICE      : {found['label']}")
+            print(f"   app settings: driver '{found['driver']}', baud {found['baud']}")
+            print(f"   sample      : {found['sample'].hex(' ')}")
+        else:
+            print("   DEVICE      : no reply at JK 115200 / Voltronic 2400 / Growatt 9600")
+            print("                 (check RS485 A/B, power, baud — or it's a non-inverter port)")
+        print()
+    print("Attach in the app using the stable by-id path — ttyUSB numbers change on reboot.")
+
+
 def _test_serial(path: str, baud: int, protocol: str = "phocos") -> None:
     """Open a serial port and probe it with the protocol for the chosen inverter family.
 
@@ -1182,6 +1250,9 @@ def main() -> None:
     ap.add_argument("--hid-vid", default=None, help="only bridge this HID vendor id (hex, e.g. 0665)")
     ap.add_argument("--hid-pid", default=None, help="only bridge this HID product id (hex, e.g. 5161)")
     ap.add_argument("--list-usb", action="store_true", help="DIAGNOSTIC: list all USB/HID devices and exit")
+    ap.add_argument("--identify", action="store_true",
+                    help="DIAGNOSTIC: probe every serial port and report which device (inverter/JK-BMS) "
+                         "is on each, with the driver/baud to pick in the app, then exit")
     ap.add_argument("--watch", action="store_true", help="DIAGNOSTIC: live-watch USB plug/unplug events")
     ap.add_argument("--test-serial", metavar="PATH", default=None,
                     help="DIAGNOSTIC: open a serial port, probe the inverter, then exit")
@@ -1205,6 +1276,10 @@ def main() -> None:
 
     if args.list_usb or args.list:
         _list_usb()
+        return
+
+    if args.identify:
+        _identify()
         return
 
     if args.test_serial:

@@ -21,7 +21,9 @@ import ChipSelect from "../components/ChipSelect";
 import TimeGradientBackground from "../components/TimeGradientBackground";
 
 const BAUDS = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
-const usesBaud = (type) => type === "serial" || type === "tcp";
+// serial/tcp/tunnel all drive a real serial port whose baud matters; tcp & tunnel pass it
+// through to the bridge (param key "baud"), serial sets it directly ("baudrate").
+const usesBaud = (type) => type === "serial" || type === "tcp" || type === "tunnel";
 
 function withBaud(attach, baud) {
   if (!baud || !usesBaud(attach.type)) return attach;
@@ -32,6 +34,7 @@ function withBaud(attach, baud) {
 function portKey(attach) {
   const p = attach?.params || {};
   if (attach?.type === "tcp") return `tcp:${p.host}:${p.port}`;
+  if (attach?.type === "tunnel") return `tunnel:${p.bridge}:${p.target}`;
   if (attach?.type === "serial") return `serial:${p.port}`;
   if (attach?.type === "hidraw") return `hidraw:${p.path}`;
   return JSON.stringify(attach || {});
