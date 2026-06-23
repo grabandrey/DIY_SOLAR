@@ -7,6 +7,7 @@ import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import { BackendProvider } from "./src/api";
 import { ProfileProvider } from "./src/profile";
 import { colors } from "./src/theme";
+import { useCurrentBackground, statusBarStyleForKey } from "./src/background";
 import TabBar from "./src/components/TabBar";
 import HomeScreen from "./src/screens/HomeScreen";
 import EnergyScreen from "./src/screens/EnergyScreen";
@@ -20,12 +21,19 @@ const navTheme = {
   colors: { ...DefaultTheme.colors, background: colors.bg },
 };
 
+// Status bar follows the time-of-day zone: white icons at dawn/evening/night,
+// black icons during the bright daytime.
+function TimeAwareStatusBar() {
+  const background = useCurrentBackground();
+  return <StatusBar style={statusBarStyleForKey(background.key)} />;
+}
+
 export default function App() {
   return (
     <SafeAreaProvider>
       <ProfileProvider>
         <BackendProvider>
-          <StatusBar style="dark" />
+          <TimeAwareStatusBar />
           <NavigationContainer theme={navTheme}>
             <Tab.Navigator
               tabBar={(props) => <TabBar {...props} />}

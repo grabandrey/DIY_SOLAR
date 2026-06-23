@@ -24,4 +24,8 @@ export const radius = {
   pill: 999,
 };
 
+// Apple-style concentric radius: a rounded element inset by `inset` from a parent
+// of radius `outer` keeps a common center when its radius is `outer - inset`.
+export const concentric = (outer, inset) => Math.max(outer - inset, 4);
+
 export const space = (n) => n * 4;

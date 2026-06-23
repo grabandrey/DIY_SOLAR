@@ -370,7 +370,7 @@ const styles = StyleSheet.create({
     left: -52,
     right: -52,
     bottom: -28,
-    height: 150,
+    height: 100,
   },
   bar: {
     zIndex: 1,

@@ -170,6 +170,11 @@ async def daily_energy(date: str | None = None) -> dict:
     return _energy().summary(date)
 
 
+@app.get("/api/energy/series")
+async def energy_series(date: str | None = None) -> dict:
+    return _energy().series(date)
+
+
 @app.websocket("/ws/discovery")
 async def ws_discovery(websocket: WebSocket) -> None:
     """Push the discovery snapshot (ports + devices + bridges) on an interval so the

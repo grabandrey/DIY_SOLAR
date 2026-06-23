@@ -68,6 +68,8 @@ export function useApi() {
     getDevices: () => req(baseUrl, "/devices").then((d) => d.devices),
     getDailyEnergy: (date) =>
       req(baseUrl, `/energy/daily${date ? `?date=${encodeURIComponent(date)}` : ""}`),
+    getEnergySeries: (date) =>
+      req(baseUrl, `/energy/series${date ? `?date=${encodeURIComponent(date)}` : ""}`),
     addDevice: (cfg) =>
       req(baseUrl, "/devices", { method: "POST", body: JSON.stringify(cfg) }),
     updateDevice: (id, patch) =>
@@ -81,17 +83,57 @@ function wsUrl(base, path) {
   return base.replace(/^http/, "ws") + path;
 }
 
-// Live readings: one WebSocket, latest snapshot per device, auto-reconnecting.
+// How long a device may go without any data (WS push or heartbeat poll) before it's
+// hidden, and how often we poll the REST snapshot as a heartbeat / refresh seed.
+const READING_STALE_MS = 12000;
+const HEARTBEAT_MS = 4000;
+const PRUNE_MS = 2000;
+
+// Live readings: a WebSocket stream plus a REST heartbeat poll, merged by device.
+// Each device is kept while it keeps being received; if nothing arrives for
+// READING_STALE_MS it's dropped (so it isn't shown). Tracking last-seen also means a
+// single missing frame (e.g. a battery briefly absent from one poll cycle) no longer
+// makes a device flicker out, and the heartbeat re-seeds the full set on refresh.
 export function useReadings() {
   const { baseUrl } = useBackend();
-  const [map, setMap] = useState({});
+  const [entries, setEntries] = useState({}); // device_id -> { reading, seen }
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    setMap({});
+    setEntries({});
     let closed = false;
     let retry;
     let ws;
+
+    const ingest = (r) => {
+      if (!r || !r.device_id) return;
+      setEntries((prev) => ({
+        ...prev,
+        [r.device_id]: { reading: r, seen: Date.now() },
+      }));
+    };
+
+    const prune = () => {
+      const cutoff = Date.now() - READING_STALE_MS;
+      setEntries((prev) => {
+        let changed = false;
+        const next = {};
+        for (const [id, entry] of Object.entries(prev)) {
+          if (entry.seen >= cutoff) next[id] = entry;
+          else changed = true;
+        }
+        return changed ? next : prev;
+      });
+    };
+
+    const heartbeat = () => {
+      req(baseUrl, "/readings")
+        .then((data) => {
+          if (closed || !Array.isArray(data?.readings)) return;
+          data.readings.forEach(ingest);
+        })
+        .catch(() => {});
+    };
 
     function connect() {
       try {
@@ -102,8 +144,9 @@ export function useReadings() {
       }
       ws.onopen = () => setConnected(true);
       ws.onmessage = (e) => {
-        const r = JSON.parse(e.data);
-        setMap((prev) => ({ ...prev, [r.device_id]: r }));
+        try {
+          ingest(JSON.parse(e.data));
+        } catch {}
       };
       ws.onclose = () => {
         setConnected(false);
@@ -115,14 +158,21 @@ export function useReadings() {
     }
 
     connect();
+    heartbeat();
+    const pollId = setInterval(heartbeat, HEARTBEAT_MS);
+    const pruneId = setInterval(prune, PRUNE_MS);
+
     return () => {
       closed = true;
       clearTimeout(retry);
+      clearInterval(pollId);
+      clearInterval(pruneId);
       ws?.close();
     };
   }, [baseUrl]);
 
-  return { readings: Object.values(map), connected };
+  const readings = Object.values(entries).map((entry) => entry.reading);
+  return { readings, connected };
 }
 
 // Live discovery feed: ports + configured devices + bridges.
@@ -211,4 +261,31 @@ export function useDailyEnergy(intervalMs = 10000) {
   }, [baseUrl, intervalMs]);
 
   return daily;
+}
+
+export function useEnergySeries(intervalMs = 10000) {
+  const { baseUrl } = useBackend();
+  const [series, setSeries] = useState({
+    date: null,
+    points: [],
+  });
+
+  useEffect(() => {
+    let active = true;
+
+    const load = () => {
+      req(baseUrl, "/energy/series")
+        .then((value) => active && setSeries(value))
+        .catch(() => {});
+    };
+
+    load();
+    const id = setInterval(load, intervalMs);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [baseUrl, intervalMs]);
+
+  return series;
 }

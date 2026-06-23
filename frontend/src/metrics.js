@@ -15,10 +15,7 @@ export function chargePower(r) {
 
 export function usedPower(r) {
   const m = r.metrics || {};
-  if (r.kind === "bms") {
-    const p = Number(m.power?.value) || 0;
-    return p < 0 ? -p : 0;
-  }
+  if (r.kind === "bms") return 0;
   return Number(m.ac_output_active_power?.value) || 0;
 }
 

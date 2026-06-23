@@ -1,5 +1,6 @@
 import { registerRootComponent } from 'expo';
 
+import './src/fixedFontScale';
 import './src/i18n';
 import App from './App';
 

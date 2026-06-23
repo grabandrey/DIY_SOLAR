@@ -15,10 +15,7 @@ export function chargePower(r) {
 
 export function usedPower(r) {
   const m = r.metrics || {};
-  if (r.kind === "bms") {
-    const p = Number(m.power?.value) || 0;
-    return p < 0 ? -p : 0;
-  }
+  if (r.kind === "bms") return 0;
   return Number(m.ac_output_active_power?.value) || 0;
 }
 
@@ -38,6 +35,27 @@ export function capacity(r, deviceLabel = "device") {
   const soc = m.soc?.value ?? m.battery_capacity?.value;
   if (soc != null) return `${Math.round(soc)}% SOC`;
   return r.kind || deviceLabel;
+}
+
+export function batteryVoltage(r) {
+  const m = r.metrics || {};
+  return Number(m.pack_voltage?.value ?? m.battery_voltage?.value) || 0;
+}
+
+export function batteryPower(r) {
+  const m = r.metrics || {};
+  const direct = m.power?.value ?? m.battery_power?.value;
+  if (direct != null) return Number(direct) || 0;
+  return batteryVoltage(r) * batteryCurrent(r);
+}
+
+export function batteryCurrent(r) {
+  const m = r.metrics || {};
+  const direct = m.pack_current?.value ?? m.battery_current?.value;
+  if (direct != null) return Number(direct) || 0;
+  const charge = Number(m.battery_charge_current?.value) || 0;
+  const discharge = Number(m.battery_discharge_current?.value) || 0;
+  return charge - discharge;
 }
 
 export function sumBy(readings, fn) {

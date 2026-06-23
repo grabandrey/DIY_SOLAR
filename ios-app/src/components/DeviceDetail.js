@@ -54,13 +54,13 @@ const METRIC_LABEL_KEYS = {
   nominal_capacity: "nominalCapacity",
 };
 
-function metricLabel(key, metric, t) {
+export function metricLabel(key, metric, t) {
   const translationKey = METRIC_LABEL_KEYS[key];
   if (translationKey) return t(`device.metrics.${translationKey}`);
   return metric.label || key.replaceAll("_", " ");
 }
 
-function formatValue(metric) {
+export function formatValue(metric) {
   const value =
     typeof metric.value === "number"
       ? Number.isInteger(metric.value)

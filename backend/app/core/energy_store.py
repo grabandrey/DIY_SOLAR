@@ -54,8 +54,11 @@ class EnergyStore:
         self._daily: Dict[tuple[str, str], Dict[str, float]] = {}
         # device_id -> latest integration sample.
         self._state: Dict[str, Dict[str, float | str]] = {}
+        # (device_id, minute_ts) -> latest sample for that minute.
+        self._samples: Dict[tuple[str, int], Dict[str, float | str]] = {}
         self._dirty_daily: set[tuple[str, str]] = set()
         self._dirty_state: set[str] = set()
+        self._dirty_samples: set[tuple[str, int]] = set()
 
         self._configure_database()
         self._create_schema()
@@ -88,6 +91,15 @@ class EnergyStore:
                     solar_power_w REAL NOT NULL,
                     load_power_w REAL NOT NULL
                 ) WITHOUT ROWID;
+
+                CREATE TABLE IF NOT EXISTS energy_samples (
+                    day TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    sample_ts INTEGER NOT NULL,
+                    solar_power_w REAL NOT NULL,
+                    load_power_w REAL NOT NULL,
+                    PRIMARY KEY (day, device_id, sample_ts)
+                ) WITHOUT ROWID;
                 """
             )
 
@@ -97,6 +109,7 @@ class EnergyStore:
         ).isoformat()
         with self._db:
             self._db.execute("DELETE FROM daily_energy WHERE day < ?", (cutoff,))
+            self._db.execute("DELETE FROM energy_samples WHERE day < ?", (cutoff,))
             rows = self._db.execute(
                 """
                 SELECT day, device_id, solar_wh, consumption_wh,
@@ -138,6 +151,7 @@ class EnergyStore:
         solar_power, load_power = _powers(reading)
         hardware_solar_wh = _metric(reading, "pv_energy_today") * 1000
         key = (day, reading.device_id)
+        minute_ts = int(sample_ts // 60) * 60
 
         with self._lock:
             previous = self._state.get(reading.device_id)
@@ -176,8 +190,16 @@ class EnergyStore:
                 "solar_power_w": solar_power,
                 "load_power_w": load_power,
             }
+            sample_key = (reading.device_id, minute_ts)
+            self._samples[sample_key] = {
+                "day": day,
+                "sample_ts": minute_ts,
+                "solar_power_w": solar_power,
+                "load_power_w": load_power,
+            }
             self._dirty_daily.add(key)
             self._dirty_state.add(reading.device_id)
+            self._dirty_samples.add(sample_key)
 
     def summary(self, day: str | None = None) -> Dict[str, Any]:
         """Return only values that have been persisted in ``daily_energy``.
@@ -214,10 +236,58 @@ class EnergyStore:
             "devices": devices,
         }
 
+    def series(self, day: str | None = None) -> Dict[str, Any]:
+        """Return minute-level solar/load power points for one local day."""
+        selected_day = day or datetime.now(self.timezone).date().isoformat()
+        with self._lock:
+            rows = self._db.execute(
+                """
+                SELECT device_id, sample_ts, solar_power_w, load_power_w
+                FROM energy_samples
+                WHERE day = ?
+                """,
+                (selected_day,),
+            ).fetchall()
+            by_device_sample = {
+                (row["device_id"], int(row["sample_ts"])): {
+                    "sample_ts": int(row["sample_ts"]),
+                    "solar_power_w": float(row["solar_power_w"]),
+                    "load_power_w": float(row["load_power_w"]),
+                }
+                for row in rows
+            }
+            for (device_id, sample_ts), sample in self._samples.items():
+                if sample["day"] != selected_day:
+                    continue
+                by_device_sample[(device_id, sample_ts)] = {
+                    "sample_ts": int(sample["sample_ts"]),
+                    "solar_power_w": float(sample["solar_power_w"]),
+                    "load_power_w": float(sample["load_power_w"]),
+                }
+
+        buckets: Dict[int, Dict[str, float]] = {}
+        for sample in by_device_sample.values():
+            bucket = buckets.setdefault(
+                int(sample["sample_ts"]),
+                {"solar_power_w": 0.0, "load_power_w": 0.0},
+            )
+            bucket["solar_power_w"] += float(sample["solar_power_w"])
+            bucket["load_power_w"] += float(sample["load_power_w"])
+
+        points = [
+            {
+                "t": sample_ts * 1000,
+                "solar_w": round(values["solar_power_w"], 1),
+                "load_w": round(values["load_power_w"], 1),
+            }
+            for sample_ts, values in sorted(buckets.items())
+        ]
+        return {"date": selected_day, "points": points}
+
     def flush(self) -> int:
         """Persist all changed aggregates and states in one SQLite transaction."""
         with self._lock:
-            if not self._dirty_daily and not self._dirty_state:
+            if not self._dirty_daily and not self._dirty_state and not self._dirty_samples:
                 return 0
 
             daily_rows = [
@@ -240,6 +310,16 @@ class EnergyStore:
                     self._state[device_id]["load_power_w"],
                 )
                 for device_id in self._dirty_state
+            ]
+            sample_rows = [
+                (
+                    self._samples[(device_id, sample_ts)]["day"],
+                    device_id,
+                    self._samples[(device_id, sample_ts)]["sample_ts"],
+                    self._samples[(device_id, sample_ts)]["solar_power_w"],
+                    self._samples[(device_id, sample_ts)]["load_power_w"],
+                )
+                for device_id, sample_ts in self._dirty_samples
             ]
 
             with self._db:
@@ -270,10 +350,25 @@ class EnergyStore:
                     """,
                     state_rows,
                 )
+                self._db.executemany(
+                    """
+                    INSERT INTO energy_samples (
+                        day, device_id, sample_ts, solar_power_w, load_power_w
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(day, device_id, sample_ts) DO UPDATE SET
+                        solar_power_w = excluded.solar_power_w,
+                        load_power_w = excluded.load_power_w
+                    """,
+                    sample_rows,
+                )
 
+            flushed_samples = set(self._dirty_samples)
             self._dirty_daily.clear()
             self._dirty_state.clear()
-            return len(daily_rows) + len(state_rows)
+            self._dirty_samples.clear()
+            for key in flushed_samples:
+                self._samples.pop(key, None)
+            return len(daily_rows) + len(state_rows) + len(sample_rows)
 
     def close(self) -> None:
         self.flush()
