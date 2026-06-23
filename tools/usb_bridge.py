@@ -19,6 +19,11 @@ not a serial port — so they won't show up as ``/dev/cu.*``. HID support needs 
     pip3 install pyserial hidapi
     # macOS: brew install hidapi      Linux: apt install libhidapi-hidraw0
 
+For a CLOUD backend (e.g. Railway) with this bridge at home, also install websocket-client —
+the bridge then dials OUT to the backend (reverse tunnel) since the cloud can't reach home:
+
+    pip3 install websocket-client
+
 The backend address comes from ``SA_BACKEND_URL`` or ``--backend-url``. The bridge uses
 it to auto-detect which of its own LAN addresses that server can reach, so on a Raspberry
 Pi it can run unattended and the backend connects back to the right host.
@@ -43,6 +48,7 @@ import json
 import logging
 import os
 import platform
+import queue
 import socket
 import subprocess
 import sys
@@ -68,6 +74,17 @@ try:
 except Exception:  # noqa: BLE001
     _hid = None
     HID_OK = False
+
+# websocket-client is optional but required for the REVERSE TUNNEL — the mode that lets
+# this bridge run at home while the backend runs in the cloud (e.g. Railway). The bridge
+# dials OUT to the backend over a WebSocket (NAT-friendly) and the backend drives devices
+# back through it. Without it, only the LAN mode (HTTP feed + TCP relay) works.
+try:
+    import websocket as _ws  # the 'websocket-client' package
+    WS_OK = True
+except Exception:  # noqa: BLE001
+    _ws = None
+    WS_OK = False
 
 # Backend URL used for bridge heartbeat registration. Configure it through the environment
 # or --backend-url so the bridge can run unattended as a service without editing this file.
@@ -621,12 +638,14 @@ class Bridge:
             return [
                 {
                     **e["info"],
+                    # Stable per-device id; the reverse tunnel opens channels by this.
+                    "target": dev_id,
                     "bridge_host": self.advertise_host,
                     "bridge_port": e["tcp_port"],
                     "baud": self.baud,
                     "kind": e["kind"],
                 }
-                for e in self.devices.values()
+                for dev_id, e in self.devices.items()
                 if e["present"]
             ]
 
@@ -782,6 +801,168 @@ class Bridge:
                 if b"\r" in out:
                     break
         return out[: out.index(b"\r") + 1] if b"\r" in out else out
+
+
+# ---------------------------------------------------------------------------
+# Reverse tunnel: dial OUT to the backend so it can drive our devices from the cloud.
+# ---------------------------------------------------------------------------
+class ChannelSocket:
+    """A socket-look-alike backed by a tunnel channel.
+
+    Lets the existing relay code (`_dispatch` / `_relay_serial` / `_relay_hid`, which were
+    written against a TCP `conn`) run unchanged over the WebSocket tunnel: `recv` pulls
+    bytes the backend sent (queued by the WS receive loop), `sendall` ships bytes back as
+    `data` frames.
+    """
+
+    def __init__(self, client: "_TunnelClient", ch: int):
+        self.client = client
+        self.ch = ch
+        self._q: "queue.Queue[bytes | None]" = queue.Queue()
+        self._buf = b""
+        self._timeout = None
+        self._closed = False
+
+    def settimeout(self, t):
+        self._timeout = t
+
+    def recv(self, n: int) -> bytes:
+        if not self._buf:
+            try:
+                item = self._q.get(timeout=self._timeout)
+            except queue.Empty:
+                raise socket.timeout()
+            if item is None:  # EOF (channel closed by backend or tunnel dropped)
+                return b""
+            self._buf = item
+        chunk, self._buf = self._buf[:n], self._buf[n:]
+        return chunk
+
+    def sendall(self, data: bytes) -> None:
+        self.client._send({"t": "data", "ch": self.ch, "b": bytes(data).hex()})
+
+    def send(self, data: bytes) -> int:
+        self.sendall(data)
+        return len(data)
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self.client._send({"t": "close", "ch": self.ch})
+            self.client._drop(self.ch)
+
+    # --- fed by the tunnel receive loop ---
+    def feed(self, data: bytes) -> None:
+        self._q.put(data)
+
+    def eof(self) -> None:
+        self._q.put(None)
+
+
+class _TunnelClient:
+    """Persistent outbound WebSocket to the backend (reconnecting).
+
+    Pushes the device list periodically and serves a channel per device the backend opens,
+    reusing the bridge's normal relay path. This is what makes a home bridge + cloud
+    backend work: only outbound connectivity is required.
+    """
+
+    def __init__(self, bridge: Bridge, ws_url: str, bridge_id: str):
+        self.bridge = bridge
+        self.ws_url = ws_url
+        self.bridge_id = bridge_id
+        self.ws = None
+        self._send_lock = threading.Lock()
+        self.channels: dict[int, ChannelSocket] = {}
+
+    def _send(self, frame: dict) -> None:
+        ws = self.ws
+        if ws is None:
+            return
+        with self._send_lock:
+            try:
+                ws.send(json.dumps(frame))
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _drop(self, ch: int) -> None:
+        self.channels.pop(ch, None)
+
+    def _ports_sender(self, stop: threading.Event) -> None:
+        while not stop.is_set():
+            self._send({"t": "ports", "ports": self.bridge.snapshot()})
+            stop.wait(5.0)
+
+    def run_forever(self) -> None:
+        while True:
+            stop = threading.Event()
+            try:
+                self.ws = _ws.create_connection(self.ws_url, timeout=10)
+                self._send({"t": "hello", "bridge": self.bridge_id})
+                log.info("tunnel connected to %s (bridge id %s)", self.ws_url, self.bridge_id)
+                threading.Thread(target=self._ports_sender, args=(stop,), daemon=True).start()
+                while True:
+                    msg = self.ws.recv()
+                    if not msg:
+                        break
+                    self._on_frame(json.loads(msg))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("tunnel disconnected (%s); reconnecting in 3s", exc)
+            finally:
+                stop.set()
+                try:
+                    if self.ws:
+                        self.ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.ws = None
+                for sock in list(self.channels.values()):
+                    sock.eof()
+                self.channels.clear()
+            time.sleep(3.0)
+
+    def _on_frame(self, frame: dict) -> None:
+        t = frame.get("t")
+        if t == "open":
+            ch = frame.get("ch")
+            sock = ChannelSocket(self, ch)
+            # Seed the baud as the control line the relay's handshake expects, so it's read
+            # locally (no dependency on a separate frame arriving within the handshake window).
+            baud = frame.get("baud")
+            if baud:
+                sock.feed(b"\x00SACONF baud=%d\n" % int(baud))
+            self.channels[ch] = sock
+            threading.Thread(
+                target=self._serve_channel, args=(sock, frame.get("target")), daemon=True
+            ).start()
+        elif t == "data":
+            sock = self.channels.get(frame.get("ch"))
+            if sock is not None:
+                sock.feed(bytes.fromhex(frame.get("b", "")))
+        elif t == "close":
+            sock = self.channels.pop(frame.get("ch"), None)
+            if sock is not None:
+                sock.eof()
+
+    def _serve_channel(self, sock: ChannelSocket, target: str) -> None:
+        entry = self.bridge.devices.get(target)
+        if not entry or not entry.get("present"):
+            log.warning("tunnel: open for unknown/absent device %r", target)
+            sock.close()
+            return
+        try:
+            self.bridge._dispatch(sock, ("tunnel", sock.ch), target)
+        finally:
+            sock.close()
+
+
+def _backend_ws_url(backend_url: str) -> str:
+    u = backend_url.rstrip("/")
+    if u.startswith("https://"):
+        return "wss://" + u[len("https://"):] + "/ws/bridge"
+    if u.startswith("http://"):
+        return "ws://" + u[len("http://"):] + "/ws/bridge"
+    return u + "/ws/bridge"
 
 
 def _make_disco(bridge: Bridge):
@@ -1065,13 +1246,27 @@ def main() -> None:
     threading.Thread(target=scanner, daemon=True).start()
 
     feed_url = f"http://{advertise_host}:{args.disco_port}"
-    # Announce ourselves to the backend so it auto-discovers this bridge (no manual IP).
-    if args.backend_url:
-        threading.Thread(
-            target=_register_loop,
-            args=(feed_url, args.backend_url),
-            daemon=True,
-        ).start()
+    tunnel_active = bool(args.backend_url and WS_OK)
+
+    # Reverse tunnel: required when the backend is remote (e.g. Railway) and can't reach
+    # this machine. We dial OUT to it and it drives our devices back through the socket.
+    # It carries both discovery and device I/O, so the HTTP registration below is skipped.
+    if tunnel_active:
+        tunnel = _TunnelClient(bridge, _backend_ws_url(args.backend_url), socket.gethostname())
+        threading.Thread(target=tunnel.run_forever, daemon=True).start()
+        log.info("reverse tunnel -> %s", _backend_ws_url(args.backend_url))
+    else:
+        if args.backend_url and not WS_OK:
+            log.warning("websocket-client not installed — reverse tunnel disabled. Required when "
+                        "the backend is remote (e.g. Railway):  pip3 install websocket-client")
+        # LAN mode: announce our feed URL so a same-network backend fetches it back. A cloud
+        # backend can't reach this, which is exactly why the tunnel above exists.
+        if args.backend_url:
+            threading.Thread(
+                target=_register_loop,
+                args=(feed_url, args.backend_url),
+                daemon=True,
+            ).start()
 
     log.info("discovery feed: %s/ports  (leave running; open UI -> Devices -> Scan)", feed_url)
     if args.verbose:

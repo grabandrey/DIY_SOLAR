@@ -26,6 +26,7 @@ from .core.energy_store import EnergyStore
 from .core.manager import DeviceManager
 from .core.poller import Poller
 from .core.ports import list_bridges, register_bridge
+from .core.tunnel import hub as tunnel_hub
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("solar-assistant")
@@ -173,6 +174,14 @@ async def daily_energy(date: str | None = None) -> dict:
 @app.get("/api/energy/series")
 async def energy_series(date: str | None = None) -> dict:
     return _energy().series(date)
+
+
+@app.websocket("/ws/bridge")
+async def ws_bridge(websocket: WebSocket) -> None:
+    """A home USB bridge dials in here and stays connected. The backend then drives its
+    devices over this socket (see app/core/tunnel.py), so a cloud backend can reach USB
+    hardware behind a home NAT without any inbound connectivity to the bridge."""
+    await tunnel_hub.serve(websocket)
 
 
 @app.websocket("/ws/discovery")

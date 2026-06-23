@@ -150,3 +150,5 @@ class DeviceManager:
             raise ValueError("hidraw transport requires a 'path'")
         if ttype == "tcp" and not (params.get("host") and params.get("port")):
             raise ValueError("tcp transport requires 'host' and 'port'")
+        if ttype == "tunnel" and not (params.get("bridge") and params.get("target")):
+            raise ValueError("tunnel transport requires 'bridge' and 'target'")

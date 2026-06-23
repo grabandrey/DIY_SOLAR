@@ -11,7 +11,7 @@ import React, {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // Sensible default for development — the Mac's LAN IP. Editable in Settings.
-export const DEFAULT_BASE_URL = "http://192.168.0.13:8000";
+export const DEFAULT_BASE_URL = "https://backend-production-b3b1.up.railway.app";
 const STORE_KEY = "sa.baseUrl";
 
 const BackendCtx = createContext(null);

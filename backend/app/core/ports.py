@@ -31,6 +31,8 @@ try:
 except Exception:  # pragma: no cover
     list_ports = None
 
+from .tunnel import hub as _tunnel
+
 # Optional static bridge feed (back-compat). A bridge on another machine no longer needs
 # this: it registers itself at runtime via register_bridge() (POST /api/bridge/register),
 # so the backend learns its IP automatically without SA_BRIDGE_URL. Empty disables the
@@ -87,12 +89,15 @@ def list_bridges() -> List[Dict[str, Any]]:
         for url, seen in sorted(_registered.items()):
             if now - seen <= BRIDGE_TTL:
                 out.append({"url": url, "source": "registered", "seconds_ago": round(now - seen, 1)})
+    out.extend(_tunnel.list_bridges())
     return out
 
 
 def scan_ports() -> List[Dict[str, Any]]:
     ports = _scan_local() if SHOW_LOCAL_PORTS else []
     ports.extend(_scan_bridge())
+    # Bridges that dialed out to us over the reverse tunnel (home bridge + cloud backend).
+    ports.extend(_tunnel.list_ports())
     # De-dupe by (source, path) so a port isn't listed twice.
     seen, unique = set(), []
     for p in ports:

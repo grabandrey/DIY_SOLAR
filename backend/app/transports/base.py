@@ -80,6 +80,10 @@ def build_transport(config: Dict[str, Any]) -> Transport:
         from .tcp_transport import TcpTransport
 
         return TcpTransport(**config.get("params", {}))
+    if ttype == "tunnel":
+        from .tunnel_transport import TunnelTransport
+
+        return TunnelTransport(**config.get("params", {}))
     if ttype == "mock":
         from .mock_transport import MockTransport
 
