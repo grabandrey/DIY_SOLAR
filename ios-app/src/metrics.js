@@ -1,5 +1,5 @@
-// Derive the design's "charged" / "used" / "capacity" figures from a device reading,
-// across both inverter and BMS metric shapes.
+// Derive "charged" / "used" / capacity figures from a device reading, across both
+// inverter and BMS metric shapes. Ported from the web frontend so the numbers match.
 export function chargePower(r) {
   const m = r.metrics || {};
   if (r.kind === "bms") {
@@ -22,21 +22,28 @@ export function usedPower(r) {
   return Number(m.ac_output_active_power?.value) || 0;
 }
 
-export function capacity(r) {
+export function gridPower(r) {
+  const m = r.metrics || {};
+  return (
+    Number(m.grid_power?.value) ||
+    Number(m.ac_input_active_power?.value) ||
+    0
+  );
+}
+
+export function capacity(r, deviceLabel = "device") {
   const m = r.metrics || {};
   const ah = m.nominal_capacity?.value;
   if (ah != null) return `${Math.round(ah)} Ah`;
   const soc = m.soc?.value ?? m.battery_capacity?.value;
   if (soc != null) return `${Math.round(soc)}% SOC`;
-  return r.kind;
+  return r.kind || deviceLabel;
 }
 
 export function sumBy(readings, fn) {
   return readings.filter((r) => r.online).reduce((a, r) => a + fn(r), 0);
 }
 
-// Average state-of-charge across devices that report one (used for the "Total Energy"
-// battery cards). Falls back to 0 when nothing reports SOC yet.
 export function avgSoc(readings) {
   const socs = readings
     .filter((r) => r.online)
@@ -46,3 +53,5 @@ export function avgSoc(readings) {
   if (!socs.length) return 0;
   return Math.round(socs.reduce((a, b) => a + b, 0) / socs.length);
 }
+
+export const kw = (w) => (w / 1000).toFixed(2);

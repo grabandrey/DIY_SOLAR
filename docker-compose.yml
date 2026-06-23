@@ -6,6 +6,9 @@ services:
     environment:
       SA_POLL_INTERVAL: "${SA_POLL_INTERVAL:-2.0}"
       SA_LOG_LEVEL: "${SA_LOG_LEVEL:-INFO}"
+      SA_TIMEZONE: "${SA_TIMEZONE:-Europe/Bucharest}"
+      SA_ENERGY_FLUSH_INTERVAL: "${SA_ENERGY_FLUSH_INTERVAL:-30}"
+      SA_ENERGY_RETENTION_DAYS: "${SA_ENERGY_RETENTION_DAYS:-400}"
       # Discovery feed from the host USB bridge (tools/usb_bridge.py). Used on
       # macOS/Windows where the container can't see host USB directly.
       SA_BRIDGE_URL: "${SA_BRIDGE_URL:-http://host.docker.internal:5510}"

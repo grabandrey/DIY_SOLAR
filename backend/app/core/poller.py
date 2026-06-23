@@ -16,13 +16,15 @@ from typing import Dict, Set
 
 from ..devices.base import Device
 from .bus import bus
+from .energy_store import EnergyStore
 
 log = logging.getLogger(__name__)
 
 
 class Poller:
-    def __init__(self, interval: float = 2.0):
+    def __init__(self, interval: float = 2.0, energy_store: EnergyStore | None = None):
         self.interval = interval
+        self.energy_store = energy_store
         self._tasks: Dict[str, asyncio.Task] = {}
         self._devices: Dict[str, Device] = {}
         # device_id -> every reading id it last published (a parallel master fans out to
@@ -117,6 +119,8 @@ class Poller:
     async def _emit(self, device: Device, readings: list) -> None:
         new_ids: Set[str] = set()
         for reading in readings:
+            if self.energy_store is not None:
+                self.energy_store.record(reading)
             await bus.publish(reading)
             new_ids.add(reading.device_id)
         for stale in self._reading_ids.get(device.device_id, set()) - new_ids:

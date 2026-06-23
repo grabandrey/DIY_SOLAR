@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.solar-assistant.usb-bridge</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_WITH_PYTHON_PATH</string>
+    <string>REPLACE_WITH_REPOSITORY_PATH/tools/usb_bridge.py</string>
+    <string>--backend-url</string>
+    <string>http://192.168.0.13:8000</string>
+    <string>--advertise-host</string>
+    <string>192.168.0.10</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>REPLACE_WITH_REPOSITORY_PATH</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>3</integer>
+  <key>StandardOutPath</key>
+  <string>/tmp/solar-usb-bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/solar-usb-bridge.err</string>
+</dict>
+</plist>

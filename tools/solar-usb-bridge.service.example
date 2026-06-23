@@ -1,0 +1,16 @@
+[Unit]
+Description=Solar Assistant USB bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=REPLACE_WITH_USER
+WorkingDirectory=REPLACE_WITH_REPOSITORY_PATH
+Environment=SA_BACKEND_URL=http://192.168.0.13:8000
+ExecStart=REPLACE_WITH_PYTHON_PATH tools/usb_bridge.py --advertise-host 192.168.0.10
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

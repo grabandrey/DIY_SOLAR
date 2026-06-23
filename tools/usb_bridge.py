@@ -19,10 +19,9 @@ not a serial port — so they won't show up as ``/dev/cu.*``. HID support needs 
     pip3 install pyserial hidapi
     # macOS: brew install hidapi      Linux: apt install libhidapi-hidraw0
 
-The backend machine's address is baked in below as ``SERVER_IP`` (the Solar Assistant
-backend, e.g. your Mac). The bridge uses it to auto-detect which of its own LAN addresses
-that server can reach it on, so on a Raspberry Pi you just run the bridge with no flags and
-the backend connects back to the right host. Edit ``SERVER_IP`` if the backend moves.
+The backend address comes from ``SA_BACKEND_URL`` or ``--backend-url``. The bridge uses
+it to auto-detect which of its own LAN addresses that server can reach, so on a Raspberry
+Pi it can run unattended and the backend connects back to the right host.
 
 Usage:
     python3 tools/usb_bridge.py              # auto-detect + bridge (serial + HID)
@@ -70,16 +69,9 @@ except Exception:  # noqa: BLE001
     _hid = None
     HID_OK = False
 
-# Address of the machine running the Solar Assistant backend (e.g. your Mac). The bridge
-# advertises whichever of its own LAN IPs this server reaches it on, so the backend connects
-# back to the right host. Set to None to advertise host.docker.internal (bridge + backend on
-# the same machine). Edit this if the backend moves to a different IP.
-SERVER_IP = "192.168.0.13"
-
-# Port the Solar Assistant backend API listens on (docker-compose maps 8000). The bridge
-# POSTs its discovery URL to http://SERVER_IP:SERVER_API_PORT/api/bridge/register so the
-# backend auto-learns this bridge — no SA_BRIDGE_URL / manual IP needed on the server.
-SERVER_API_PORT = 8000
+# Backend URL used for bridge heartbeat registration. Configure it through the environment
+# or --backend-url so the bridge can run unattended as a service without editing this file.
+DEFAULT_BACKEND_URL = os.getenv("SA_BACKEND_URL", "http://192.168.0.13:8000").rstrip("/")
 
 # USB ids / descriptions commonly seen on Voltronic-family (Axpert/Phocos) cables.
 _INVERTER_HINTS = ("0665:5161", "voltronic", "axpert", "phocos", "growatt", "cp210", "ch340", "ftdi")
@@ -124,16 +116,16 @@ def _local_ip_toward(server_ip: str) -> str:
         s.close()
 
 
-def _register_loop(feed_url: str, interval: float = 10.0) -> None:
+def _register_loop(feed_url: str, backend_url: str, interval: float = 10.0) -> None:
     """Heartbeat: tell the backend our discovery URL so it auto-finds us (no manual IP).
 
-    POSTs to http://SERVER_IP:SERVER_API_PORT/api/bridge/register every `interval` seconds.
+    POSTs to the configured backend's /api/bridge/register every `interval` seconds.
     The backend expires bridges that stop posting, so this doubles as a liveness signal.
     """
     import urllib.error
     import urllib.request
 
-    target = f"http://{SERVER_IP}:{SERVER_API_PORT}/api/bridge/register"
+    target = f"{backend_url.rstrip('/')}/api/bridge/register"
     body = json.dumps({"url": feed_url}).encode()
     announced = False
     while True:
@@ -984,8 +976,13 @@ def main() -> None:
     ap.add_argument("--base-port", type=int, default=5500, help="first TCP port assigned")
     ap.add_argument("--advertise-host", default=None,
                     help="hostname/IP the backend uses to reach this machine. By default it is "
-                         "auto-detected from the baked-in SERVER_IP (or host.docker.internal if that "
-                         "is None). Set explicitly to override.")
+                         "auto-detected from --backend-url. Set explicitly to override.")
+    ap.add_argument(
+        "--backend-url",
+        default=DEFAULT_BACKEND_URL,
+        help="backend base URL for bridge heartbeat registration "
+             "(default: SA_BACKEND_URL or %(default)s)",
+    )
     ap.add_argument("--interval", type=float, default=2.0, help="re-scan interval (seconds)")
     ap.add_argument("--all-hid", action="store_true", help="bridge every HID device, not just likely inverters")
     ap.add_argument("--hid-vid", default=None, help="only bridge this HID vendor id (hex, e.g. 0665)")
@@ -1035,16 +1032,16 @@ def main() -> None:
     pid_filter = int(args.hid_pid, 16) if args.hid_pid else None
 
     # Resolve what address the backend should use to reach this bridge.
-    # Explicit --advertise-host wins; otherwise derive it from the baked-in SERVER_IP;
-    # otherwise fall back to host.docker.internal (bridge + backend on the same machine).
+    # Explicit --advertise-host wins; otherwise derive the route from the backend URL.
     advertise_host = args.advertise_host
     if advertise_host is None:
-        if SERVER_IP:
+        backend_host = args.backend_url.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+        if backend_host not in ("localhost", "127.0.0.1", "host.docker.internal"):
             try:
-                advertise_host = _local_ip_toward(SERVER_IP)
-                log.info("advertising %s (route to server %s)", advertise_host, SERVER_IP)
+                advertise_host = _local_ip_toward(backend_host)
+                log.info("advertising %s (route to backend %s)", advertise_host, backend_host)
             except OSError as exc:
-                sys.exit(f"could not determine local IP toward server {SERVER_IP}: {exc}\n"
+                sys.exit(f"could not determine local IP toward backend {backend_host}: {exc}\n"
                          f"Pass --advertise-host <this-machine-ip> explicitly instead.")
         else:
             advertise_host = "host.docker.internal"
@@ -1069,8 +1066,12 @@ def main() -> None:
 
     feed_url = f"http://{advertise_host}:{args.disco_port}"
     # Announce ourselves to the backend so it auto-discovers this bridge (no manual IP).
-    if SERVER_IP:
-        threading.Thread(target=_register_loop, args=(feed_url,), daemon=True).start()
+    if args.backend_url:
+        threading.Thread(
+            target=_register_loop,
+            args=(feed_url, args.backend_url),
+            daemon=True,
+        ).start()
 
     log.info("discovery feed: %s/ports  (leave running; open UI -> Devices -> Scan)", feed_url)
     if args.verbose:

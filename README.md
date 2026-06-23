@@ -104,6 +104,35 @@ python3 tools/usb_bridge.py            # leave running; auto-detects plug/unplug
 python3 tools/usb_bridge.py --list-usb # DIAGNOSTIC: list every USB/HID device it can see
 ```
 
+The mobile app is not part of data collection. Once devices are attached, the backend
+restores them from `backend/config/devices.json`, polls their bridge TCP ports continuously,
+and writes daily energy aggregates even when no web or mobile client is connected.
+
+For unattended collection, run the bridge as an operating-system service. A systemd
+template is provided at `tools/solar-usb-bridge.service.example`. Set its user, repository,
+Python path, backend URL, and bridge host address, then install it:
+
+```bash
+sudo cp tools/solar-usb-bridge.service.example /etc/systemd/system/solar-usb-bridge.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now solar-usb-bridge
+```
+
+The bridge backend URL can also be configured without editing source:
+
+```bash
+SA_BACKEND_URL=http://192.168.0.13:8000 \
+python3 tools/usb_bridge.py --advertise-host 192.168.0.10
+```
+
+On macOS, use `tools/com.solar-assistant.usb-bridge.plist.example`: replace its
+placeholders, copy it to `~/Library/LaunchAgents/com.solar-assistant.usb-bridge.plist`,
+then load it with:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.solar-assistant.usb-bridge.plist
+```
+
 Then (with `docker compose up` running): **⚙ Devices → Scan** → your inverter appears
 as **host USB** → pick `axpert`/`phocos`/`growatt` → **Attach**. The backend reaches it over
 `host.docker.internal` automatically (HID report chunking is done in the bridge).

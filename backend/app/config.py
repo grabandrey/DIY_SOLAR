@@ -25,6 +25,16 @@ class Settings:
         self.store_path: Path = Path(
             os.getenv("SA_STORE", str(DEFAULT_CONFIG_PATH.parent / "devices.json"))
         )
+        self.energy_db_path: Path = Path(
+            os.getenv("SA_ENERGY_DB", str(DEFAULT_CONFIG_PATH.parent / "energy.sqlite3"))
+        )
+        self.timezone: str = os.getenv("SA_TIMEZONE", "Europe/Bucharest")
+        self.energy_flush_interval: float = float(
+            os.getenv("SA_ENERGY_FLUSH_INTERVAL", "30")
+        )
+        self.energy_retention_days: int = int(
+            os.getenv("SA_ENERGY_RETENTION_DAYS", "400")
+        )
         self.cors_origins: List[str] = os.getenv("SA_CORS_ORIGINS", "*").split(",")
         self.log_level: str = os.getenv("SA_LOG_LEVEL", "INFO").upper()
 

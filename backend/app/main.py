@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .core.bus import bus
+from .core.energy_store import EnergyStore
 from .core.manager import DeviceManager
 from .core.poller import Poller
 from .core.ports import list_bridges, register_bridge
@@ -30,18 +31,37 @@ logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s 
 log = logging.getLogger("solar-assistant")
 
 manager: DeviceManager | None = None
+energy_store: EnergyStore | None = None
+
+
+async def _flush_energy(store: EnergyStore) -> None:
+    while True:
+        await asyncio.sleep(settings.energy_flush_interval)
+        try:
+            await asyncio.to_thread(store.flush)
+        except Exception:  # noqa: BLE001 - keep aggregation alive after transient DB errors
+            log.exception("Failed to flush daily energy aggregates")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager
-    poller = Poller(interval=settings.poll_interval)
+    global manager, energy_store
+    energy_store = EnergyStore(
+        settings.energy_db_path,
+        settings.timezone,
+        settings.energy_retention_days,
+    )
+    flush_task = asyncio.create_task(_flush_energy(energy_store))
+    poller = Poller(interval=settings.poll_interval, energy_store=energy_store)
     manager = DeviceManager(poller, settings.store_path)
     await manager.start()
     try:
         yield
     finally:
+        flush_task.cancel()
+        await asyncio.gather(flush_task, return_exceptions=True)
         await poller.stop()
+        await asyncio.to_thread(energy_store.close)
 
 
 app = FastAPI(title="Solar Assistant", version="0.2.0", lifespan=lifespan)
@@ -59,6 +79,12 @@ def _mgr() -> DeviceManager:
     if manager is None:
         raise HTTPException(503, "manager not ready")
     return manager
+
+
+def _energy() -> EnergyStore:
+    if energy_store is None:
+        raise HTTPException(503, "energy store not ready")
+    return energy_store
 
 
 @app.get("/api/health")
@@ -137,6 +163,11 @@ async def readings() -> dict:
 @app.get("/api/readings/{device_id}")
 async def reading_for(device_id: str) -> dict:
     return {"reading": bus.latest_for(device_id)}
+
+
+@app.get("/api/energy/daily")
+async def daily_energy(date: str | None = None) -> dict:
+    return _energy().summary(date)
 
 
 @app.websocket("/ws/discovery")
