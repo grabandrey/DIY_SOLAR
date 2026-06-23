@@ -71,7 +71,7 @@ except Exception:  # noqa: BLE001
 
 # Backend URL used for bridge heartbeat registration. Configure it through the environment
 # or --backend-url so the bridge can run unattended as a service without editing this file.
-DEFAULT_BACKEND_URL = os.getenv("SA_BACKEND_URL", "http://192.168.0.13:8000").rstrip("/")
+DEFAULT_BACKEND_URL = os.getenv("SA_BACKEND_URL", "https://backend-production-b3b1.up.railway.app").rstrip("/")
 
 # USB ids / descriptions commonly seen on Voltronic-family (Axpert/Phocos) cables.
 _INVERTER_HINTS = ("0665:5161", "voltronic", "axpert", "phocos", "growatt", "cp210", "ch340", "ftdi")
