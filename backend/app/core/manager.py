@@ -100,18 +100,24 @@ class DeviceManager:
                 self._activate(cfg)
             return cfg
 
+    # Config keys the running poller task depends on; if none of these change, an edit
+    # is cosmetic (e.g. the display image) and must not knock the device offline.
+    _RUNTIME_KEYS = ("driver", "transport", "options", "enabled", "name")
+
     async def update_device(self, device_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
             if device_id not in self._configs:
                 raise KeyError(device_id)
-            cfg = {**self._configs[device_id], **patch, "id": device_id}
+            old = self._configs[device_id]
+            cfg = {**old, **patch, "id": device_id}
             self._validate(cfg)
             self._configs[device_id] = cfg
             self._persist()
-            # Re-apply: stop the old task, start fresh if still enabled.
-            self._deactivate(device_id)
-            if cfg.get("enabled", True):
-                self._activate(cfg)
+            # Only re-apply (stop the old task, start fresh) when a runtime field changed.
+            if any(old.get(key) != cfg.get(key) for key in self._RUNTIME_KEYS):
+                self._deactivate(device_id)
+                if cfg.get("enabled", True):
+                    self._activate(cfg)
             return cfg
 
     async def remove_device(self, device_id: str) -> None:

@@ -18,6 +18,7 @@ import { useApi, useBackend, useDiscovery } from "../api";
 import { setAppLanguage } from "../i18n";
 import { useProfile } from "../profile";
 import ChipSelect from "../components/ChipSelect";
+import DeviceImagePicker from "../components/DeviceImagePicker";
 import TimeGradientBackground from "../components/TimeGradientBackground";
 
 const BAUDS = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
@@ -73,6 +74,7 @@ export default function SettingsScreen() {
 
   const attach = (cfg) => run(() => api.addDevice(cfg));
   const toggle = (d) => run(() => api.updateDevice(d.id, { enabled: !d.enabled }));
+  const setImage = (d, image) => run(() => api.updateDevice(d.id, { image }));
   const remove = (d) =>
     Alert.alert(t("settings.removeTitle"), t("settings.removeQuestion", { name: d.name }), [
       { text: t("common.cancel"), style: "cancel" },
@@ -192,6 +194,10 @@ export default function SettingsScreen() {
                 </View>
               </View>
             </View>
+            <DeviceImagePicker
+              value={d.image}
+              onChange={(image) => setImage(d, image)}
+            />
             <View style={styles.btnRow}>
               <Pressable style={styles.smallBtn} onPress={() => toggle(d)} disabled={busy}>
                 <Text style={styles.smallBtnText}>
@@ -263,6 +269,7 @@ function PortRow({ port, drivers, busy, attached, onAttach }) {
   const [driver, setDriver] = useState(drivers.includes("axpert") ? "axpert" : drivers[0] || "axpert");
   const [name, setName] = useState(port.description || port.path);
   const [baud, setBaud] = useState(port.baud || 2400);
+  const [image, setImage] = useState(null);
   const showBaud = usesBaud(port.attach?.type);
 
   return (
@@ -275,10 +282,11 @@ function PortRow({ port, drivers, busy, attached, onAttach }) {
       <TextInput value={name} onChangeText={setName} placeholder={t("common.name")} placeholderTextColor={colors.muted} style={styles.input} />
       <ChipSelect label={t("common.driver")} options={drivers} value={driver} onChange={setDriver} />
       {showBaud && <ChipSelect label={t("common.baud")} options={BAUDS} value={baud} onChange={setBaud} />}
+      <DeviceImagePicker value={image} onChange={setImage} />
       <Pressable
         style={[styles.primaryBtn, attached && styles.disabledBtn]}
         disabled={busy || attached}
-        onPress={() => onAttach({ name, driver, transport: withBaud(port.attach, baud) })}
+        onPress={() => onAttach({ name, driver, image, transport: withBaud(port.attach, baud) })}
       >
         <Text style={styles.primaryBtnText}>
           {attached ? t("settings.attached") : t("settings.attach")}
@@ -297,6 +305,7 @@ function ManualForm({ drivers, busy, onAttach }) {
   const [baud, setBaud] = useState(2400);
   const [driver, setDriver] = useState(drivers[0] || "axpert");
   const [name, setName] = useState(() => t("settings.myInverter"));
+  const [image, setImage] = useState(null);
 
   function submit() {
     let params;
@@ -304,7 +313,7 @@ function ManualForm({ drivers, busy, onAttach }) {
     else if (type === "hidraw") params = { path };
     else if (type === "tcp") params = { host, port: Number(tcpPort) };
     else params = {};
-    onAttach({ name, driver, transport: withBaud({ type, params }, baud) });
+    onAttach({ name, driver, image, transport: withBaud({ type, params }, baud) });
   }
 
   return (
@@ -326,6 +335,7 @@ function ManualForm({ drivers, busy, onAttach }) {
         <TextInput value={path} onChangeText={setPath} placeholder="/dev/ttyUSB0" placeholderTextColor={colors.muted} autoCapitalize="none" style={styles.input} />
       ) : null}
       {usesBaud(type) && <ChipSelect label={t("common.baud")} options={BAUDS} value={baud} onChange={setBaud} />}
+      <DeviceImagePicker value={image} onChange={setImage} />
       <Pressable style={styles.primaryBtn} disabled={busy} onPress={submit}>
         <Text style={styles.primaryBtnText}>{t("settings.addDevice")}</Text>
       </Pressable>

@@ -600,6 +600,12 @@ class Bridge:
 
     _PORT_MAP_FILE = os.path.expanduser("~/.solar_usb_bridge_ports.json")
 
+    # A USB-serial adapter (e.g. the Growatt's CH340/CP210x at 9600 Modbus) can briefly
+    # vanish from list_ports.comports() under load without being physically unplugged. Keep
+    # treating it as present until it's been missing this many seconds, so a transient
+    # enumeration miss doesn't drop it from discovery or break an in-flight relay read.
+    _PRESENCE_GRACE = float(os.getenv("SA_BRIDGE_PRESENCE_GRACE", "20"))
+
     def __init__(self, baud, base_port, advertise_host, all_hid, vid_filter, pid_filter, disco_port=5510):
         self.baud = baud
         self.base_port = base_port
@@ -683,23 +689,32 @@ class Bridge:
                 },
             }
 
+        now = time.monotonic()
         with self.lock:
             for dev_id, d in found.items():
                 if dev_id not in self.devices:
                     tcp_port = self._port_for(dev_id)
-                    self.devices[dev_id] = {**d, "tcp_port": tcp_port, "present": True}
+                    self.devices[dev_id] = {**d, "tcp_port": tcp_port, "present": True, "last_seen": now}
                     self._start_listener(dev_id, tcp_port)
                     log.info("detected %s %s -> tcp %d", d["kind"], d["info"]["path"], tcp_port)
                 else:
-                    self.devices[dev_id].update(info=d["info"], target=d["target"])
-                    if not self.devices[dev_id]["present"]:
+                    entry = self.devices[dev_id]
+                    entry.update(info=d["info"], target=d["target"], last_seen=now)
+                    if not entry["present"]:
                         log.info("re-detected %s", d["info"]["path"])
-                    self.devices[dev_id]["present"] = True
+                    entry["present"] = True
 
+            # Only mark a device gone once it has been missing past the grace window; a
+            # single missed enumeration is treated as a transient blip, not an unplug.
             for dev_id, entry in self.devices.items():
                 if dev_id not in found and entry["present"]:
-                    entry["present"] = False
-                    log.info("unplugged %s", entry["info"]["path"])
+                    absent = now - entry.get("last_seen", now)
+                    if absent > self._PRESENCE_GRACE:
+                        entry["present"] = False
+                        log.info("unplugged %s (absent %.0fs)", entry["info"]["path"], absent)
+                    else:
+                        log.debug("transient miss for %s (absent %.1fs); holding present",
+                                  entry["info"]["path"], absent)
 
     def snapshot(self) -> list[dict]:
         with self.lock:
@@ -1027,10 +1042,16 @@ class _TunnelClient:
 
     def _serve_channel(self, sock: ChannelSocket, target: str) -> None:
         entry = self.bridge.devices.get(target)
-        if not entry or not entry.get("present"):
-            log.warning("tunnel: open for unknown/absent device %r", target)
+        # Relay as long as we know the device's path. Don't refuse just because it's
+        # momentarily marked absent — a USB-serial adapter can blip out of enumeration
+        # while still being fully readable; _dispatch opens the (last-known) path and
+        # reports a genuine failure cleanly if it really is gone.
+        if not entry or not entry.get("target"):
+            log.warning("tunnel: open for unknown device %r", target)
             sock.close()
             return
+        if not entry.get("present"):
+            log.info("tunnel: opening %r though currently marked absent", target)
         try:
             self.bridge._dispatch(sock, ("tunnel", sock.ch), target)
         finally:
