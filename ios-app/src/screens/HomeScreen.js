@@ -395,7 +395,12 @@ export default function HomeScreen({ navigation }) {
   const [loadRange, setLoadRange] = useState("hour");
   const [graphScrubbing, setGraphScrubbing] = useState(false);
 
-  const production = sumBy(readings, chargePower);
+  // Solar production is the inverters' PV input only; BMS charge power must not be
+  // counted here or the live total reads higher than what the inverters produce.
+  const production = sumBy(
+    readings.filter((reading) => reading.kind !== "bms"),
+    chargePower
+  );
   const load = sumBy(readings, usedPower);
   const { sunrise, sunset } = sunTimesForDate();
   const nowMs = Date.now();

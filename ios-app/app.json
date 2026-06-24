@@ -9,7 +9,20 @@
     "backgroundColor": "#EDE9E3",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.grabandrei.ios-app"
+      "bundleIdentifier": "com.grabandrei.ios-app",
+      "infoPlist": {
+        "UIApplicationSceneManifest": {
+          "UIApplicationSupportsMultipleScenes": false,
+          "UISceneConfigurations": {
+            "UIWindowSceneSessionRoleApplication": [
+              {
+                "UISceneConfigurationName": "Default Configuration",
+                "UISceneDelegateClassName": "$(PRODUCT_MODULE_NAME).SceneDelegate"
+              }
+            ]
+          }
+        }
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -30,6 +43,12 @@
           "ios": {
             "deploymentTarget": "16.4"
           }
+        }
+      ],
+      [
+        "./plugins/withIosDeploymentTarget",
+        {
+          "deploymentTarget": "16.4"
         }
       ]
     ]
