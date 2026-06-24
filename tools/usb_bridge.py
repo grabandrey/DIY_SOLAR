@@ -199,6 +199,26 @@ def _stable_serial_path(device: str, wait: float = 2.5) -> str:
         time.sleep(0.1)
 
 
+def _serial_identity(p, stable_path: str, vidpid_unique: bool = False) -> str:
+    """A stable identity for a serial adapter, used to keep its TCP port across resets.
+
+    Prefer the USB serial number (vid:pid:serial): it is burned into the adapter and does
+    not change when the device re-enumerates on a different USB/hub port after a power
+    cycle. Many FT232R / CH340 clones ship a blank serial, though; for those, if the
+    adapter's vid:pid is unique among the connected ports we key on vid:pid alone (still
+    stable across re-enumeration). Only when neither is available do we fall back to the
+    topology-based by-id/device path, which is what shifts the JK (FT232R) onto a new TCP
+    port after a bridge reset and forces a re-add.
+    """
+    if p.vid and p.pid:
+        sn = (getattr(p, "serial_number", None) or "").strip()
+        if sn:
+            return f"serial:usb-{p.vid:04x}:{p.pid:04x}:{sn}"
+        if vidpid_unique:
+            return f"serial:usb-{p.vid:04x}:{p.pid:04x}"
+    return f"serial:{stable_path}"
+
+
 # ---------------------------------------------------------------------------
 # HID device wrapper (smooths over the two common `hid`/`hidapi` PyPI packages)
 # ---------------------------------------------------------------------------
@@ -667,16 +687,27 @@ class Bridge:
     def scan(self) -> None:
         found: dict[str, dict] = {}
 
-        for p in list_ports.comports():
-            # Skip the motherboard's built-in 16550 UARTs (/dev/ttyS*) — nothing is attached
-            # and they'd clutter the port map (a PC can expose 10+ of them). USB adapters are
-            # ttyUSB*/ttyACM*.
-            if p.device.startswith("/dev/ttyS"):
-                continue
+        # Skip the motherboard's built-in 16550 UARTs (/dev/ttyS*) — nothing is attached and
+        # they'd clutter the port map (a PC can expose 10+ of them). USB adapters are
+        # ttyUSB*/ttyACM*.
+        comports = [p for p in list_ports.comports() if not p.device.startswith("/dev/ttyS")]
+        # Count adapters per vid:pid so a lone adapter of its type can be identified by
+        # vid:pid even when its serial number is blank (common on FT232R/CH340 clones).
+        vidpid_counts: dict[tuple, int] = {}
+        for p in comports:
+            if p.vid and p.pid:
+                vidpid_counts[(p.vid, p.pid)] = vidpid_counts.get((p.vid, p.pid), 0) + 1
+
+        for p in comports:
             stable = _stable_serial_path(p.device)
-            found[f"serial:{stable}"] = {
+            vidpid_unique = bool(p.vid and p.pid and vidpid_counts.get((p.vid, p.pid)) == 1)
+            dev_id = _serial_identity(p, stable, vidpid_unique)
+            found[dev_id] = {
                 "kind": "serial",
                 "target": stable,
+                # Path-based id this device used before serial-based identity, so a
+                # persisted TCP port can be migrated to the new id without changing it.
+                "legacy_id": f"serial:{stable}",
                 "info": {
                     "path": stable,
                     "description": p.description or "",
@@ -707,10 +738,20 @@ class Bridge:
         with self.lock:
             for dev_id, d in found.items():
                 if dev_id not in self.devices:
+                    # Carry a previously-persisted port from the old path-based id to the
+                    # stable serial id so switching schemes keeps the device's TCP port.
+                    legacy = d.get("legacy_id")
+                    if (legacy and legacy != dev_id
+                            and dev_id not in self._port_map and legacy in self._port_map):
+                        self._port_map[dev_id] = self._port_map.pop(legacy)
+                        self._save_port_map()
+                        log.info("migrated tcp %d: %s -> %s",
+                                 self._port_map[dev_id], legacy, dev_id)
                     tcp_port = self._port_for(dev_id)
                     self.devices[dev_id] = {**d, "tcp_port": tcp_port, "present": True, "last_seen": now}
                     self._start_listener(dev_id, tcp_port)
-                    log.info("detected %s %s -> tcp %d", d["kind"], d["info"]["path"], tcp_port)
+                    log.info("detected %s %s (%s) -> tcp %d",
+                             d["kind"], d["info"]["path"], dev_id, tcp_port)
                 else:
                     entry = self.devices[dev_id]
                     entry.update(info=d["info"], target=d["target"], last_seen=now)
