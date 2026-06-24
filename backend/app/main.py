@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .core.bus import bus
 from .core.energy_store import EnergyStore
+from .core.live import aggregate as live_aggregate
 from .core.manager import DeviceManager
 from .core.poller import Poller
 from .core.ports import list_bridges, register_bridge
@@ -166,6 +167,15 @@ async def reading_for(device_id: str) -> dict:
     return {"reading": bus.latest_for(device_id)}
 
 
+@app.get("/api/live")
+async def live_stats() -> dict:
+    """Backend-computed live totals (solar/load/grid/battery) across online devices.
+
+    The clients render these directly instead of summing raw readings themselves.
+    """
+    return live_aggregate(bus.latest())
+
+
 @app.get("/api/energy/daily")
 async def daily_energy(date: str | None = None) -> dict:
     return _energy().summary(date)
@@ -207,6 +217,25 @@ async def ws_discovery(websocket: WebSocket) -> None:
         pass
     except asyncio.CancelledError:
         raise
+
+
+@app.websocket("/ws/live")
+async def ws_live(websocket: WebSocket) -> None:
+    """Stream backend-computed live totals. A fresh aggregate is pushed whenever any
+    device reading changes, so the clients never aggregate raw readings themselves."""
+    await websocket.accept()
+    queue = await bus.subscribe()
+    try:
+        await websocket.send_json(live_aggregate(bus.latest()))
+        while True:
+            await queue.get()  # any reading change; recompute from the full snapshot
+            await websocket.send_json(live_aggregate(bus.latest()))
+    except WebSocketDisconnect:
+        pass
+    except asyncio.CancelledError:
+        raise
+    finally:
+        await bus.unsubscribe(queue)
 
 
 @app.websocket("/ws")

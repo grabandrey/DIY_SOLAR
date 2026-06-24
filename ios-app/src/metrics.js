@@ -1,75 +1,42 @@
-// Derive "charged" / "used" / capacity figures from a device reading, across both
-// inverter and BMS metric shapes. Ported from the web frontend so the numbers match.
+// Per-device stat accessors. The backend precomputes every value into each reading's
+// `derived` block (see backend app/core/metrics.py), so the app never derives stats
+// from raw metrics — it just reads what the backend already calculated. Live totals
+// across devices come precomputed too, via the `useLive()` hook in api.js.
+const d = (r) => r?.derived || {};
+
 export function chargePower(r) {
-  const m = r.metrics || {};
-  if (r.kind === "bms") {
-    const p = Number(m.power?.value) || 0; // BMS power: + = charging
-    return p > 0 ? p : 0;
-  }
-  return (
-    Number(m.pv_input_power?.value) ||
-    Number(m.battery_ac_charge_power?.value) ||
-    0
-  );
+  return Number(d(r).solar_w) || 0;
 }
 
 export function usedPower(r) {
-  const m = r.metrics || {};
-  if (r.kind === "bms") return 0;
-  return Number(m.ac_output_active_power?.value) || 0;
+  return Number(d(r).load_w) || 0;
 }
 
 export function gridPower(r) {
-  const m = r.metrics || {};
-  return (
-    Number(m.grid_power?.value) ||
-    Number(m.ac_input_active_power?.value) ||
-    0
-  );
+  return Number(d(r).grid_w) || 0;
 }
 
+export function batteryVoltage(r) {
+  return Number(d(r).battery_v) || 0;
+}
+
+export function batteryCurrent(r) {
+  return Number(d(r).battery_a) || 0;
+}
+
+export function batteryPower(r) {
+  return Number(d(r).battery_w) || 0;
+}
+
+// Display label for a battery: capacity in Ah, else SOC %, else the device kind.
+// Pure formatting (not a stat), so it reads the raw metrics directly.
 export function capacity(r, deviceLabel = "device") {
   const m = r.metrics || {};
   const ah = m.nominal_capacity?.value;
   if (ah != null) return `${Math.round(ah)} Ah`;
-  const soc = m.soc?.value ?? m.battery_capacity?.value;
+  const soc = r?.derived?.battery_soc ?? m.soc?.value ?? m.battery_capacity?.value;
   if (soc != null) return `${Math.round(soc)}% SOC`;
   return r.kind || deviceLabel;
-}
-
-export function batteryVoltage(r) {
-  const m = r.metrics || {};
-  return Number(m.pack_voltage?.value ?? m.battery_voltage?.value) || 0;
-}
-
-export function batteryPower(r) {
-  const m = r.metrics || {};
-  const direct = m.power?.value ?? m.battery_power?.value;
-  if (direct != null) return Number(direct) || 0;
-  return batteryVoltage(r) * batteryCurrent(r);
-}
-
-export function batteryCurrent(r) {
-  const m = r.metrics || {};
-  const direct = m.pack_current?.value ?? m.battery_current?.value;
-  if (direct != null) return Number(direct) || 0;
-  const charge = Number(m.battery_charge_current?.value) || 0;
-  const discharge = Number(m.battery_discharge_current?.value) || 0;
-  return charge - discharge;
-}
-
-export function sumBy(readings, fn) {
-  return readings.filter((r) => r.online).reduce((a, r) => a + fn(r), 0);
-}
-
-export function avgSoc(readings) {
-  const socs = readings
-    .filter((r) => r.online)
-    .map((r) => r.metrics?.soc?.value ?? r.metrics?.battery_capacity?.value)
-    .filter((v) => v != null)
-    .map(Number);
-  if (!socs.length) return 0;
-  return Math.round(socs.reduce((a, b) => a + b, 0) / socs.length);
 }
 
 export const kw = (w) => (w / 1000).toFixed(2);

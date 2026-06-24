@@ -6,7 +6,7 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { useTranslation } from "react-i18next";
 import { colors, radius } from "../theme";
 import { useReadings } from "../api";
-import { chargePower, usedPower, capacity, kw } from "../metrics";
+import { chargePower, usedPower, batteryPower, capacity, kw } from "../metrics";
 import TimeGradientBackground from "../components/TimeGradientBackground";
 import DeviceDetail from "../components/DeviceDetail";
 import DeviceTypeIcon from "../components/DeviceTypeIcon";
@@ -116,7 +116,7 @@ function DeviceSection({ title, devices, type, onOpen, t }) {
 function DeviceCard({ reading, type, onPress, t }) {
   const batteryLevel =
     reading.metrics?.soc?.value ?? reading.metrics?.battery_capacity?.value;
-  const batteryPower = Math.abs(Number(reading.metrics?.power?.value) || 0);
+  const batteryWatts = Math.abs(batteryPower(reading));
   const primaryValue =
     type === "battery"
       ? batteryLevel != null
@@ -125,7 +125,7 @@ function DeviceCard({ reading, type, onPress, t }) {
       : `${kw(chargePower(reading))} kW`;
   const secondaryValue =
     type === "battery"
-      ? `${kw(batteryPower)} kW`
+      ? `${kw(batteryWatts)} kW`
       : `${kw(usedPower(reading))} kW`;
 
   return (

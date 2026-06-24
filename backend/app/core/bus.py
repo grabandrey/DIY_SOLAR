@@ -11,6 +11,7 @@ import asyncio
 from typing import Any, Dict, List, Set
 
 from ..devices.base import Reading
+from .metrics import derived
 
 
 class EventBus:
@@ -21,6 +22,9 @@ class EventBus:
 
     async def publish(self, reading: Reading) -> None:
         payload = reading.to_dict()
+        # Precompute the per-device stat values once, here, so every consumer (REST
+        # snapshot, WS stream, live aggregate) renders the same backend-derived numbers.
+        payload["derived"] = derived(reading)
         async with self._lock:
             self._latest[reading.device_id] = payload
             subscribers = list(self._subscribers)

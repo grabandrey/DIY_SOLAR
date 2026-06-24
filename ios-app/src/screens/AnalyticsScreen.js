@@ -3,19 +3,19 @@ import { View, Text, ScrollView, StyleSheet } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import { colors, radius } from "../theme";
-import { useReadings, useTimeSeries } from "../api";
-import { chargePower, usedPower, sumBy, kw } from "../metrics";
+import { useLive, useTimeSeries } from "../api";
+import { kw } from "../metrics";
 import LineChart from "../components/LineChart";
 import TimeGradientBackground from "../components/TimeGradientBackground";
 
 export default function AnalyticsScreen() {
   const insets = useSafeAreaInsets();
   const { t } = useTranslation();
-  const { readings } = useReadings();
+  const live = useLive();
   const series = useTimeSeries(
     () => ({
-      charged: Math.round(sumBy(readings, chargePower)),
-      used: Math.round(sumBy(readings, usedPower)),
+      charged: Math.round(live.solar_w),
+      used: Math.round(live.load_w),
     }),
     { maxPoints: 30 }
   );

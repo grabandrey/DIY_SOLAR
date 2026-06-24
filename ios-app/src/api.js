@@ -66,6 +66,7 @@ export function useApi() {
     getBridges: () => req(baseUrl, "/bridge").then((d) => d.bridges),
     getDrivers: () => req(baseUrl, "/drivers").then((d) => d.drivers),
     getDevices: () => req(baseUrl, "/devices").then((d) => d.devices),
+    getLive: () => req(baseUrl, "/live"),
     getDailyEnergy: (date) =>
       req(baseUrl, `/energy/daily${date ? `?date=${encodeURIComponent(date)}` : ""}`),
     getEnergySeries: (date) =>
@@ -173,6 +174,76 @@ export function useReadings() {
 
   const readings = Object.values(entries).map((entry) => entry.reading);
   return { readings, connected };
+}
+
+// Live aggregate stats (solar/load/grid/battery totals), precomputed by the backend.
+// Streamed over /ws/live with a REST poll as a seed/heartbeat — the app never sums
+// readings itself; it only renders these values.
+const EMPTY_LIVE = {
+  solar_w: 0,
+  load_w: 0,
+  grid_w: 0,
+  battery_w: 0,
+  battery_a: 0,
+  battery_soc: 0,
+  inverter_count: 0,
+  battery_count: 0,
+};
+
+export function useLive() {
+  const { baseUrl } = useBackend();
+  const [live, setLive] = useState(EMPTY_LIVE);
+  const [connected, setConnected] = useState(false);
+
+  useEffect(() => {
+    setLive(EMPTY_LIVE);
+    let closed = false;
+    let retry;
+    let ws;
+
+    const apply = (data) => {
+      if (data && typeof data === "object") setLive({ ...EMPTY_LIVE, ...data });
+    };
+
+    const heartbeat = () => {
+      req(baseUrl, "/live")
+        .then((data) => !closed && apply(data))
+        .catch(() => {});
+    };
+
+    function connect() {
+      try {
+        ws = new WebSocket(wsUrl(baseUrl, "/ws/live"));
+      } catch {
+        retry = setTimeout(connect, 2500);
+        return;
+      }
+      ws.onopen = () => setConnected(true);
+      ws.onmessage = (e) => {
+        try {
+          apply(JSON.parse(e.data));
+        } catch {}
+      };
+      ws.onclose = () => {
+        setConnected(false);
+        if (!closed) retry = setTimeout(connect, 2500);
+      };
+      ws.onerror = () => {};
+    }
+
+    connect();
+    heartbeat();
+    const pollId = setInterval(heartbeat, HEARTBEAT_MS);
+
+    return () => {
+      closed = true;
+      clearTimeout(retry);
+      clearInterval(pollId);
+      ws?.close();
+    };
+  }, [baseUrl]);
+
+  return { ...live, connected };
 }
 
 // Live discovery feed: ports + configured devices + bridges.

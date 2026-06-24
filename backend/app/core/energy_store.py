@@ -10,25 +10,7 @@ from typing import Any, Dict
 from zoneinfo import ZoneInfo
 
 from ..devices.base import Reading
-
-
-def _metric(reading: Reading, *keys: str) -> float:
-    for key in keys:
-        metric = reading.metrics.get(key)
-        if metric is not None:
-            try:
-                return float(metric.value)
-            except (TypeError, ValueError):
-                continue
-    return 0.0
-
-
-def _powers(reading: Reading) -> tuple[float, float]:
-    if reading.kind.value == "bms":
-        return 0.0, 0.0
-    solar = _metric(reading, "pv_input_power") + _metric(reading, "pv2_power")
-    load = _metric(reading, "ac_output_active_power", "total_ac_output_active_power")
-    return max(solar, 0.0), max(load, 0.0)
+from .metrics import load_power, metric_value, solar_power
 
 
 class EnergyStore:
@@ -148,8 +130,9 @@ class EnergyStore:
         timestamp = datetime.fromisoformat(reading.ts.replace("Z", "+00:00"))
         day = timestamp.astimezone(self.timezone).date().isoformat()
         sample_ts = timestamp.timestamp()
-        solar_power, load_power = _powers(reading)
-        hardware_solar_wh = _metric(reading, "pv_energy_today") * 1000
+        solar_w = solar_power(reading)
+        load_w = load_power(reading)
+        hardware_solar_wh = metric_value(reading, "pv_energy_today") * 1000
         key = (day, reading.device_id)
         minute_ts = int(sample_ts // 60) * 60
 
@@ -174,10 +157,10 @@ class EnergyStore:
                 elapsed = sample_ts - float(previous["sample_ts"])
                 if elapsed <= self.MAX_SAMPLE_GAP_SECONDS:
                     aggregate["solar_wh"] += (
-                        (float(previous["solar_power_w"]) + solar_power) / 2
+                        (float(previous["solar_power_w"]) + solar_w) / 2
                     ) * elapsed / 3600
                     aggregate["consumption_wh"] += (
-                        (float(previous["load_power_w"]) + load_power) / 2
+                        (float(previous["load_power_w"]) + load_w) / 2
                     ) * elapsed / 3600
 
             aggregate["hardware_solar_wh"] = max(
@@ -187,15 +170,15 @@ class EnergyStore:
             self._state[reading.device_id] = {
                 "day": day,
                 "sample_ts": sample_ts,
-                "solar_power_w": solar_power,
-                "load_power_w": load_power,
+                "solar_power_w": solar_w,
+                "load_power_w": load_w,
             }
             sample_key = (reading.device_id, minute_ts)
             self._samples[sample_key] = {
                 "day": day,
                 "sample_ts": minute_ts,
-                "solar_power_w": solar_power,
-                "load_power_w": load_power,
+                "solar_power_w": solar_w,
+                "load_power_w": load_w,
             }
             self._dirty_daily.add(key)
             self._dirty_state.add(reading.device_id)

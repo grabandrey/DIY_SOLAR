@@ -20,17 +20,9 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import { colors } from "../theme";
 import { sunTimesForDate, useCurrentBackground } from "../background";
-import { useDailyEnergy, useEnergySeries, useReadings } from "../api";
+import { useDailyEnergy, useEnergySeries, useLive, useReadings } from "../api";
 import { useProfile } from "../profile";
-import {
-  chargePower,
-  usedPower,
-  batteryVoltage,
-  batteryCurrent,
-  batteryPower,
-  sumBy,
-  kw,
-} from "../metrics";
+import { batteryVoltage, batteryCurrent, kw } from "../metrics";
 import GlassCard from "../components/GlassCard";
 import LiveStat from "../components/LiveStat";
 import BatteryInfoSheet from "../components/BatteryInfoSheet";
@@ -380,6 +372,7 @@ export default function HomeScreen({ navigation }) {
   const { t, i18n } = useTranslation();
   const { name } = useProfile();
   const { readings, connected } = useReadings();
+  const live = useLive();
   const daily = useDailyEnergy();
   const storedSeries = useEnergySeries();
   const background = useCurrentBackground();
@@ -395,13 +388,10 @@ export default function HomeScreen({ navigation }) {
   const [loadRange, setLoadRange] = useState("hour");
   const [graphScrubbing, setGraphScrubbing] = useState(false);
 
-  // Solar production is the inverters' PV input only; BMS charge power must not be
-  // counted here or the live total reads higher than what the inverters produce.
-  const production = sumBy(
-    readings.filter((reading) => reading.kind !== "bms"),
-    chargePower
-  );
-  const load = sumBy(readings, usedPower);
+  // Live totals are computed by the backend (inverter PV / load, online-battery
+  // power & current); the app only renders them.
+  const production = live.solar_w;
+  const load = live.load_w;
   const { sunrise, sunset } = sunTimesForDate();
   const nowMs = Date.now();
   const dayStart = new Date(nowMs).setHours(0, 0, 0, 0);
@@ -436,15 +426,8 @@ export default function HomeScreen({ navigation }) {
     loadWindowEnd
   );
   const batteries = readings.filter((reading) => reading.kind === "bms");
-  const onlineBatteries = batteries.filter((reading) => reading.online);
-  const batteryAmps = onlineBatteries.reduce(
-    (sum, reading) => sum + batteryCurrent(reading),
-    0
-  );
-  const batteryWatts = onlineBatteries.reduce(
-    (sum, reading) => sum + batteryPower(reading),
-    0
-  );
+  const batteryAmps = live.battery_a;
+  const batteryWatts = live.battery_w;
 
   // Track the opened battery by id so the sheet keeps showing live readings.
   const selectedBattery =
