@@ -166,23 +166,37 @@ def _looks_like_inverter(*fields) -> bool:
     return any(h in blob for h in _INVERTER_HINTS)
 
 
-def _stable_serial_path(device: str) -> str:
+def _stable_serial_path(device: str, wait: float = 2.5) -> str:
     """Return the stable /dev/serial/by-id/* symlink for a /dev/ttyUSB* node.
 
     The kernel assigns ttyUSB numbers in enumeration order, so they reshuffle on reboot or
     replug. The by-id link is keyed by the adapter's serial number and never changes, so we
     use it as the device's identity and open it instead of the volatile ttyUSBN path.
+
+    Right after a power-cycle the ttyUSB node can appear a moment before udev creates its
+    by-id symlink. If we fell back to the raw ttyUSBN path in that window the device would
+    get a *different* identity (and thus a different persisted TCP port) than the app's
+    saved config expects — so the JK BMS / inverter would intermittently "not be detected"
+    after toggling the bridge. Wait briefly for the symlink so the identity stays stable.
     """
     byid = "/dev/serial/by-id"
-    try:
-        target = os.path.realpath(device)
-        for name in sorted(os.listdir(byid)):
-            link = os.path.join(byid, name)
-            if os.path.realpath(link) == target:
-                return link
-    except (FileNotFoundError, NotADirectoryError, OSError):
-        pass
-    return device
+    if not os.path.isdir(byid):
+        # No udev by-id subsystem (e.g. macOS); the device path is stable enough there.
+        return device
+    deadline = time.monotonic() + max(wait, 0.0)
+    while True:
+        try:
+            target = os.path.realpath(device)
+            for name in sorted(os.listdir(byid)):
+                link = os.path.join(byid, name)
+                if os.path.realpath(link) == target:
+                    return link
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            log.warning("no by-id symlink for %s yet; using volatile path", device)
+            return device
+        time.sleep(0.1)
 
 
 # ---------------------------------------------------------------------------
@@ -1342,15 +1356,19 @@ def main() -> None:
 
     bridge = Bridge(args.baud, args.base_port, advertise_host, args.all_hid, vid_filter, pid_filter,
                     disco_port=args.disco_port)
-    bridge.scan()
+
+    def _safe_scan() -> None:
+        try:
+            bridge.scan()
+        except Exception as exc:  # noqa: BLE001
+            log.error("scan error: %s", exc)
+
+    _safe_scan()
 
     def scanner():
         while True:
             time.sleep(args.interval)
-            try:
-                bridge.scan()
-            except Exception as exc:  # noqa: BLE001
-                log.error("scan error: %s", exc)
+            _safe_scan()
 
     threading.Thread(target=scanner, daemon=True).start()
 

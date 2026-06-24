@@ -181,38 +181,55 @@ function DeviceCarousel({ title, devices, type, onOpen, imageOf, t }) {
         decelerationRate="fast"
         style={styles.carousel}
       >
-        {devices.map((reading) => (
-          <Pressable
-            key={reading.device_id}
-            style={[styles.page, { width: pageWidth }]}
-            onPress={() => onOpen(reading)}
-            accessibilityRole="button"
-            accessibilityLabel={t("device.open", {
-              name: reading.device_name || reading.device_id,
-            })}
-          >
-            <GlassCard
-              style={styles.card}
-              glassStyle="clear"
-              tint="rgba(0,0,0,0.18)"
-              blur={10}
-              border="rgba(255,255,255,0.45)"
-              radius={radius.xl}
+        {devices.map((reading, i) => {
+          // Scale (and slightly fade) each page by its distance from the centred
+          // scroll offset, so the focused device grows in and the others shrink away.
+          const inputRange = [(i - 1) * pageWidth, i * pageWidth, (i + 1) * pageWidth];
+          const scale = scrollX.interpolate({
+            inputRange,
+            outputRange: [0.84, 1, 0.84],
+            extrapolate: "clamp",
+          });
+          const opacity = scrollX.interpolate({
+            inputRange,
+            outputRange: [0.6, 1, 0.6],
+            extrapolate: "clamp",
+          });
+          return (
+            <Pressable
+              key={reading.device_id}
+              style={[styles.page, { width: pageWidth }]}
+              onPress={() => onOpen(reading)}
+              accessibilityRole="button"
+              accessibilityLabel={t("device.open", {
+                name: reading.device_name || reading.device_id,
+              })}
             >
-              <View style={styles.nameRow}>
-                <View
-                  style={[styles.statusDot, !reading.online && styles.statusOffline]}
-                />
-                <Text style={styles.name} numberOfLines={1}>
-                  {reading.device_name || reading.device_id}
-                </Text>
-                <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.8)" />
-              </View>
-              <FocusedStats reading={reading} type={type} t={t} />
-            </GlassCard>
-            <DeviceArt reading={reading} type={type} image={imageOf?.(reading.device_id)} />
-          </Pressable>
-        ))}
+              <Animated.View style={[styles.pageInner, { opacity, transform: [{ scale }] }]}>
+                <GlassCard
+                  style={[styles.card, type === "inverter" && styles.cardNarrow]}
+                  glassStyle="clear"
+                  tint="rgba(0,0,0,0.18)"
+                  blur={10}
+                  border="rgba(255,255,255,0.45)"
+                  radius={radius.xl}
+                >
+                  <View style={styles.nameRow}>
+                    <View
+                      style={[styles.statusDot, !reading.online && styles.statusOffline]}
+                    />
+                    <Text style={styles.name} numberOfLines={1}>
+                      {reading.device_name || reading.device_id}
+                    </Text>
+                    <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.8)" />
+                  </View>
+                  <FocusedStats reading={reading} type={type} t={t} />
+                </GlassCard>
+                <DeviceArt reading={reading} type={type} image={imageOf?.(reading.device_id)} />
+              </Animated.View>
+            </Pressable>
+          );
+        })}
       </Animated.ScrollView>
 
       {devices.length > 1 && (
@@ -344,7 +361,9 @@ const styles = StyleSheet.create({
   sectionCount: { color: WHITE_DIM, fontSize: 13, fontWeight: "600" },
 
   carousel: { overflow: "visible" },
-  page: {
+  page: { justifyContent: "flex-end" },
+  pageInner: {
+    alignItems: "center",
     paddingHorizontal: SCREEN_PADDING,
     paddingTop: 0,
     paddingBottom: 26,
@@ -359,6 +378,8 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
     alignItems: "center",
   },
+  // Inverter cards are narrower than batteries' (and centred by pageInner).
+  cardNarrow: { width: "80%" },
 
   // Floating product image: absolutely positioned at the top of the page so it sits
   // mostly above the card (only its bottom IMAGE_OVERLAP px overlap the card).
@@ -406,7 +427,7 @@ const styles = StyleSheet.create({
   },
   statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.green },
   statusOffline: { backgroundColor: colors.red },
-  name: { color: colors.white, fontSize: 18, fontWeight: "700", flexShrink: 1 },
+  name: { color: colors.white, fontSize: 23, fontWeight: "700", flexShrink: 1 },
 
   stats: {
     flexDirection: "row",
