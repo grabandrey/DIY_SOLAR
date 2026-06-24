@@ -277,6 +277,15 @@ export function useDiscovery(active = true) {
     }
 
     connect();
+    // Seed configured devices over REST right away so per-device config (e.g. the chosen
+    // image) is available immediately, instead of waiting for the first WS discovery frame.
+    req(baseUrl, "/devices")
+      .then((d) => {
+        if (!closed && Array.isArray(d?.devices)) {
+          setData((prev) => ({ ...prev, devices: d.devices }));
+        }
+      })
+      .catch(() => {});
     return () => {
       closed = true;
       clearTimeout(retry);

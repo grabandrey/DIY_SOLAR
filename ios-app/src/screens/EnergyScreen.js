@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useRef } from "react";
 import {
   View,
   Text,
@@ -11,6 +11,8 @@ import {
   useWindowDimensions,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
+import { BlurView } from "expo-blur";
+import MaskedView from "@react-native-masked-view/masked-view";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -30,7 +32,6 @@ import { deviceImageSource } from "../deviceImages";
 import GlassCard from "../components/GlassCard";
 import TimeGradientBackground from "../components/TimeGradientBackground";
 import DeviceDetail from "../components/DeviceDetail";
-import DeviceTypeIcon from "../components/DeviceTypeIcon";
 
 const Stack = createNativeStackNavigator();
 
@@ -42,18 +43,36 @@ const IMAGE_OVERLAP = 60;
 
 export default function EnergyScreen() {
   return (
-    <Stack.Navigator
-      screenOptions={{
-        headerShown: false,
-        contentStyle: { backgroundColor: "transparent" },
-        animation: "slide_from_right",
-        gestureEnabled: true,
-        fullScreenGestureEnabled: true,
-      }}
-    >
-      <Stack.Screen name="DeviceList" component={DeviceListScreen} />
-      <Stack.Screen name="DeviceDetail" component={DeviceDetailScreen} />
-    </Stack.Navigator>
+    <View style={styles.root}>
+      <Stack.Navigator
+        screenOptions={{
+          headerShown: false,
+          contentStyle: { backgroundColor: "transparent" },
+          animation: "slide_from_right",
+          gestureEnabled: true,
+          fullScreenGestureEnabled: true,
+        }}
+      >
+        <Stack.Screen name="DeviceList" component={DeviceListScreen} />
+        <Stack.Screen name="DeviceDetail" component={DeviceDetailScreen} />
+      </Stack.Navigator>
+
+      {/* Top fade-to-blur, layered above the stack so it stays on the detail page too
+          (the detail slides in beneath it, never removing it). */}
+      <MaskedView
+        pointerEvents="none"
+        style={styles.topBlur}
+        maskElement={
+          <LinearGradient
+            colors={["#000", "rgba(0,0,0,0.35)", "transparent"]}
+            locations={[0, 0.58, 1]}
+            style={StyleSheet.absoluteFill}
+          />
+        }
+      >
+        <BlurView intensity={42} tint="default" style={StyleSheet.absoluteFill} />
+      </MaskedView>
+    </View>
   );
 }
 
@@ -61,7 +80,7 @@ function DeviceListScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const { t } = useTranslation();
   const background = useCurrentBackground();
-  const { readings, connected } = useReadings();
+  const { readings } = useReadings();
   // Device configs carry the chosen image (cfg.image); join by id to show it.
   // Daisy-chained units report ids like "<masterId>:<n>", so strip the suffix to reuse
   // the master device's image for every unit in the chain.
@@ -99,16 +118,9 @@ function DeviceListScreen({ navigation }) {
       />
       <ScrollView
         style={styles.scroll}
-        contentContainerStyle={{ paddingTop: insets.top + 12, paddingBottom: 140 }}
+        contentContainerStyle={{ paddingTop: insets.top + 56, paddingBottom: 140 }}
         showsVerticalScrollIndicator={false}
       >
-        <View style={styles.headerWrap}>
-          <Text style={styles.title}>{t("energy.title")}</Text>
-          <Text style={styles.sub}>
-            {connected ? t("energy.liveReadings") : t("energy.reconnecting")}
-          </Text>
-        </View>
-
         {sorted.length === 0 && (
           <View style={styles.empty}>
             <Ionicons name="hardware-chip-outline" size={28} color={colors.muted} />
@@ -118,7 +130,6 @@ function DeviceListScreen({ navigation }) {
 
         {inverters.length > 0 && (
           <DeviceCarousel
-            title={t("energy.inverters")}
             devices={inverters}
             type="inverter"
             onOpen={openDevice}
@@ -129,7 +140,6 @@ function DeviceListScreen({ navigation }) {
 
         {batteries.length > 0 && (
           <DeviceCarousel
-            title={t("energy.batteries")}
             devices={batteries}
             type="battery"
             onOpen={openDevice}
@@ -142,41 +152,27 @@ function DeviceListScreen({ navigation }) {
   );
 }
 
-// A horizontal, paged carousel of large device images. The device snapped into focus
-// drives the live-stats panel rendered beneath it.
-function DeviceCarousel({ title, devices, type, onOpen, imageOf, t }) {
+// A horizontal, paged carousel of large device images. Each page is a self-contained
+// card; the only chrome is the page-dots beneath the scroll.
+function DeviceCarousel({ devices, type, onOpen, imageOf, t }) {
   const { width } = useWindowDimensions();
   // Full-bleed pages so `pagingEnabled` (which snaps by the scroll view's frame width)
   // aligns exactly; the side gutters live inside each page instead.
   const pageWidth = width;
-  const [active, setActive] = useState(0);
-  const activeIndex = Math.min(active, devices.length - 1);
   const scrollX = useRef(new Animated.Value(0)).current;
 
   const onScroll = Animated.event(
     [{ nativeEvent: { contentOffset: { x: scrollX } } }],
     { useNativeDriver: false }
   );
-  const onMomentumScrollEnd = (e) => {
-    const idx = Math.round(e.nativeEvent.contentOffset.x / pageWidth);
-    setActive(Math.max(0, Math.min(idx, devices.length - 1)));
-  };
 
   return (
     <View style={styles.section}>
-      <View style={styles.sectionHeader}>
-        <Text style={styles.sectionTitle}>{title}</Text>
-        <Text style={styles.sectionCount}>
-          {activeIndex + 1} / {devices.length}
-        </Text>
-      </View>
-
       <Animated.ScrollView
         horizontal
         pagingEnabled
         showsHorizontalScrollIndicator={false}
         onScroll={onScroll}
-        onMomentumScrollEnd={onMomentumScrollEnd}
         scrollEventThrottle={16}
         decelerationRate="fast"
         style={styles.carousel}
@@ -240,32 +236,26 @@ function DeviceCarousel({ title, devices, type, onOpen, imageOf, t }) {
 }
 
 // Floats above the info card (absolutely positioned); most of it sits outside the card.
+// Shows the device photo only — no placeholder icon while/if the image is unavailable.
 function DeviceArt({ reading, type, image }) {
   const source = deviceImageSource(image);
+  if (!source) return null;
   return (
     <View
       style={[styles.art, type === "battery" && styles.artBattery]}
       pointerEvents="none"
     >
-      {source ? (
-        // Shadow lives on this wrapper View, not the Image — an Image clips its own
-        // shadow at its bottom edge, a View does not.
-        <View
-          style={[
-            styles.artShadow,
-            type === "battery" && styles.artShadowBattery,
-            !reading.online && styles.artImageOffline,
-          ]}
-        >
-          <Image source={source} style={styles.artImage} resizeMode="contain" />
-        </View>
-      ) : (
-        <DeviceTypeIcon
-          type={type}
-          size={150}
-          color={reading.online ? colors.white : "rgba(255,255,255,0.5)"}
-        />
-      )}
+      {/* Shadow lives on this wrapper View, not the Image — an Image clips its own
+          shadow at its bottom edge, a View does not. */}
+      <View
+        style={[
+          styles.artShadow,
+          type === "battery" && styles.artShadowBattery,
+          !reading.online && styles.artImageOffline,
+        ]}
+      >
+        <Image source={source} style={styles.artImage} resizeMode="contain" />
+      </View>
     </View>
   );
 }
@@ -341,24 +331,14 @@ function DeviceDetailScreen({ route, navigation }) {
 const WHITE_DIM = "rgba(255,255,255,0.75)";
 
 const styles = StyleSheet.create({
+  root: { flex: 1 },
+  topBlur: { position: "absolute", top: 0, left: 0, right: 0, height: 100 },
   screen: { flex: 1, backgroundColor: "#1B1B19" },
   scroll: { flex: 1, backgroundColor: "transparent" },
-  headerWrap: { paddingHorizontal: SCREEN_PADDING },
-  title: { fontSize: 28, fontWeight: "800", color: colors.white, letterSpacing: -0.6 },
-  sub: { color: WHITE_DIM, fontSize: 13, marginTop: 2, marginBottom: 18 },
   empty: { alignItems: "center", gap: 10, paddingVertical: 60, paddingHorizontal: SCREEN_PADDING },
   emptyText: { color: WHITE_DIM, fontSize: 14, textAlign: "center", maxWidth: 220 },
 
   section: { marginBottom: 34 },
-  sectionHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 14,
-    paddingHorizontal: SCREEN_PADDING,
-  },
-  sectionTitle: { color: colors.white, fontSize: 16, fontWeight: "700" },
-  sectionCount: { color: WHITE_DIM, fontSize: 13, fontWeight: "600" },
 
   carousel: { overflow: "visible" },
   page: { justifyContent: "flex-end" },

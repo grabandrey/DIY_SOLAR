@@ -42,10 +42,6 @@ const ACTIVE_SCALE = 1.18;
 export default function TabBar({ state, navigation }) {
   const index = state.index;
   const { t } = useTranslation();
-  const activeRoute = state.routes[index];
-  const nestedIndex = activeRoute.state?.index || 0;
-  const hiddenForDetail = activeRoute.name === "Energy" && nestedIndex > 0;
-
   const translateX = useRef(new Animated.Value(0)).current;
   const scale = useRef(new Animated.Value(1)).current;
   const moveId = useRef(0);
@@ -251,8 +247,6 @@ export default function TabBar({ state, navigation }) {
       barPageX.current = x;
     });
   };
-
-  if (hiddenForDetail) return null;
 
   // The moving circle: a plain Animated.View (reliable native-driven transforms) with
   // the glass material filling it. Animating the GlassView itself doesn't move it.

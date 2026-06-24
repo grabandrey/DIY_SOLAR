@@ -123,8 +123,17 @@ class TcpTransport(Transport):
                             self._reader.read(4096), max(0.05, deadline - loop.time())
                         )
                     except asyncio.TimeoutError:
+                        # No data this window but the socket is alive (a quiet gap). Keep
+                        # the connection — the stream may resume on the next poll.
                         break
                     if not chunk:
+                        # EOF: the peer (bridge) closed the connection — e.g. its serial
+                        # relay dropped when the adapter blipped. Unlike a quiet gap this
+                        # socket is dead, so close it; otherwise every later read returns
+                        # empty and the device (notably the JK, which streams via collect)
+                        # stays offline until it's manually re-enabled. Closing makes the
+                        # next poll reconnect and resync the stream.
+                        await self.close()
                         break
                     buf += chunk
                     if until and until(bytes(buf)):
