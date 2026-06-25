@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .core.bus import bus
-from .core.energy_store import EnergyStore
+from .core.energy_store import EnergyStore, build_energy_store
 from .core.live import aggregate as live_aggregate
 from .core.manager import DeviceManager
 from .core.poller import Poller
@@ -48,11 +48,7 @@ async def _flush_energy(store: EnergyStore) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global manager, energy_store
-    energy_store = EnergyStore(
-        settings.energy_db_path,
-        settings.timezone,
-        settings.energy_retention_days,
-    )
+    energy_store = build_energy_store(settings)
     flush_task = asyncio.create_task(_flush_energy(energy_store))
     poller = Poller(interval=settings.poll_interval, energy_store=energy_store)
     manager = DeviceManager(poller, settings.store_path)

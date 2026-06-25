@@ -84,7 +84,7 @@ def test_summary_reads_only_flushed_table_data_and_flush_is_batched(tmp_path):
     store.record(reading("inv-1", now + timedelta(seconds=60), 1000, 500))
 
     assert store.summary("2026-06-23")["solar_kwh"] == 0
-    assert store.flush() == 3  # aggregate row + latest-state row + minute sample row
+    assert store.flush() == 4  # aggregate row + latest-state row + two minute samples
     assert store.summary("2026-06-23")["solar_kwh"] > 0
     assert store.flush() == 0
     store.close()

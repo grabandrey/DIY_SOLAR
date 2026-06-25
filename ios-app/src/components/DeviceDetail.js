@@ -22,7 +22,13 @@ import {
   kw,
 } from "../metrics";
 import { useDeviceNames, resolveDeviceName } from "../deviceNames";
+import {
+  useDeviceIcons,
+  resolveDeviceIcon,
+  resolveDeviceIconStyle,
+} from "../deviceIcons";
 import { deviceImageSource } from "../deviceImages";
+import DeviceImagePicker from "./DeviceImagePicker";
 
 const METRIC_LABEL_KEYS = {
   grid_voltage: "gridVoltage",
@@ -103,9 +109,11 @@ export default function DeviceDetail({ reading, image, onBack }) {
   const insets = useSafeAreaInsets();
   const { t, i18n } = useTranslation();
   const { names, setName } = useDeviceNames();
+  const { icons, setIcon, iconStyles, setIconStyle } = useDeviceIcons();
   const displayName = resolveDeviceName(names, reading);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  const [pickingIcon, setPickingIcon] = useState(false);
 
   const startEdit = () => {
     setDraft(displayName);
@@ -129,7 +137,19 @@ export default function DeviceDetail({ reading, image, onBack }) {
         { hour: "2-digit", minute: "2-digit", second: "2-digit" }
       )
     : "—";
-  const imageSource = deviceImageSource(image);
+  // Icon is chosen here on the device page and stored locally (AsyncStorage), keyed by
+  // device_id. The `image` prop is only a fallback for a legacy backend-configured image.
+  const iconKey = resolveDeviceIcon(icons, reading?.device_id, image);
+  const imageSource = deviceImageSource(iconKey);
+  const isBattery = reading?.kind === "bms";
+  // Battery photos can be shown "vertical" (same size as an inverter image) or "horizontal"
+  // (much smaller). Only batteries expose the toggle; inverters always use their own size.
+  const iconStyle = resolveDeviceIconStyle(iconStyles, reading?.device_id);
+  const horizontal = isBattery && iconStyle === "horizontal";
+  // A vertical battery is laid out exactly like an inverter (image beside a stacked column
+  // of stats); only the horizontal style uses the battery-specific column layout where the
+  // image sits on top with the stats in a row beneath it.
+  const batteryLayout = isBattery && horizontal;
   const liveStats =
     reading?.kind === "bms"
       ? [
@@ -243,13 +263,16 @@ export default function DeviceDetail({ reading, image, onBack }) {
       <View
         style={[
           styles.deviceOverview,
-          reading?.kind === "bms" && styles.batteryOverview,
+          batteryLayout && styles.batteryOverview,
         ]}
       >
-        <View
+        <Pressable
+          onPress={() => setPickingIcon((p) => !p)}
+          accessibilityRole="button"
+          accessibilityLabel={t("device.changeIconLabel", { name: displayName })}
           style={[
             styles.deviceImageWrap,
-            reading?.kind === "bms" && styles.batteryImageWrap,
+            horizontal && styles.batteryImageWrapHorizontal,
           ]}
         >
           {imageSource ? (
@@ -267,22 +290,70 @@ export default function DeviceDetail({ reading, image, onBack }) {
               color={colors.muted}
             />
           )}
-        </View>
+          {/* Edit affordance so it's clear the icon is tappable to change. */}
+          <View style={styles.iconEditBadge}>
+            <Ionicons name="pencil" size={13} color={colors.ink} />
+          </View>
+        </Pressable>
         <View
           style={[
             styles.liveStats,
-            reading?.kind === "bms" && styles.batteryLiveStats,
+            batteryLayout && styles.batteryLiveStats,
           ]}
         >
           {liveStats.map((stat) => (
             <LiveMetric
               key={stat.label}
               {...stat}
-              style={reading?.kind === "bms" && styles.batteryLiveMetric}
+              style={batteryLayout && styles.batteryLiveMetric}
             />
           ))}
         </View>
       </View>
+
+      {pickingIcon && (
+        <View style={styles.iconPickerCard}>
+          <DeviceImagePicker
+            label={t("device.icon")}
+            value={iconKey}
+            onChange={(key) => {
+              if (reading?.device_id) setIcon(reading.device_id, key);
+            }}
+          />
+          {isBattery && (
+            <View style={styles.iconStyleRow}>
+              <Text style={styles.iconStyleLabel}>{t("device.iconStyle")}</Text>
+              <View style={styles.iconStyleOptions}>
+                {["vertical", "horizontal"].map((opt) => {
+                  const selected = iconStyle === opt;
+                  return (
+                    <Pressable
+                      key={opt}
+                      onPress={() => {
+                        if (reading?.device_id) setIconStyle(reading.device_id, opt);
+                      }}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      style={[styles.iconStyleOption, selected && styles.iconStyleOptionSelected]}
+                    >
+                      <Ionicons
+                        name={opt === "vertical" ? "tablet-portrait-outline" : "tablet-landscape-outline"}
+                        size={18}
+                        color={selected ? colors.ink : colors.muted}
+                      />
+                      <Text
+                        style={[styles.iconStyleText, selected && styles.iconStyleTextSelected]}
+                      >
+                        {t(`device.iconStyle_${opt}`)}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+          )}
+        </View>
+      )}
 
       <Text style={styles.sectionTitle}>{t("device.measurements")}</Text>
       <View style={styles.metricsCard}>
@@ -349,6 +420,10 @@ const styles = StyleSheet.create({
     flexDirection: "column",
     alignItems: "stretch",
     gap: 6,
+    // Cancel the inverter layout's tall fixed height and big bottom gap so the measurements
+    // section sits right under the live stats instead of after a large empty area.
+    minHeight: 0,
+    marginBottom: 12,
   },
   deviceImageWrap: {
     width: "55%",
@@ -356,9 +431,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  batteryImageWrap: {
-    width: "100%",
-    height: 230,
+  // Horizontal: a wide, large image sitting on top of the stats (battery column layout).
+  // A vertical battery uses the inverter layout/size instead (plain deviceImageWrap).
+  batteryImageWrapHorizontal: {
+    width: "46%",
+    height: 115,
+    alignSelf: "center",
   },
   deviceImageShadow: {
     width: "125%",
@@ -369,12 +447,53 @@ const styles = StyleSheet.create({
     shadowRadius: 14,
   },
   deviceImage: { width: "100%", height: "100%" },
+  iconEditBadge: {
+    position: "absolute",
+    bottom: 6,
+    right: 6,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: "rgba(255,255,255,0.92)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  iconPickerCard: {
+    backgroundColor: colors.card,
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(255,255,255,0.9)",
+    padding: 14,
+    marginBottom: 22,
+  },
+  iconStyleRow: { marginTop: 6 },
+  iconStyleLabel: { color: colors.muted, fontSize: 12, marginBottom: 8 },
+  iconStyleOptions: { flexDirection: "row", gap: 10 },
+  iconStyleOption: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    paddingVertical: 10,
+    borderRadius: radius.sm,
+    borderWidth: 1.5,
+    borderColor: colors.line,
+    backgroundColor: colors.white,
+  },
+  iconStyleOptionSelected: { borderColor: colors.yellowDeep, backgroundColor: colors.cardAlt },
+  iconStyleText: { color: colors.muted, fontSize: 13, fontWeight: "600" },
+  iconStyleTextSelected: { color: colors.ink },
   liveStats: { flex: 1, gap: 18 },
   batteryLiveStats: {
     width: "100%",
     flex: 0,
     flexDirection: "row",
     gap: 8,
+    // Push the stats a little further below the image.
+    marginTop: 18,
   },
   liveMetric: {
     flexDirection: "row",

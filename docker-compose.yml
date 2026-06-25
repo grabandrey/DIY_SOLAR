@@ -9,6 +9,12 @@ services:
       SA_TIMEZONE: "${SA_TIMEZONE:-Europe/Bucharest}"
       SA_ENERGY_FLUSH_INTERVAL: "${SA_ENERGY_FLUSH_INTERVAL:-30}"
       SA_ENERGY_RETENTION_DAYS: "${SA_ENERGY_RETENTION_DAYS:-400}"
+      DATABASE_URL: "${DATABASE_URL:-}"
+      SA_DB_HOST: "${SA_DB_HOST:-}"
+      SA_DB_PORT: "${SA_DB_PORT:-}"
+      SA_DB_NAME: "${SA_DB_NAME:-}"
+      SA_DB_USER: "${SA_DB_USER:-}"
+      SA_DB_PASSWORD: "${SA_DB_PASSWORD:-}"
       # Discovery feed from the host USB bridge (tools/usb_bridge.py). Used on
       # macOS/Windows where the container can't see host USB directly.
       SA_BRIDGE_URL: "${SA_BRIDGE_URL:-http://host.docker.internal:5510}"

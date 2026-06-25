@@ -1,36 +1,48 @@
-"""High-throughput daily energy aggregation with batched SQLite persistence."""
+"""High-throughput daily energy aggregation with batched write-behind persistence.
+
+Aggregation runs entirely in memory; the database (SQLite locally, PostgreSQL in production —
+see :mod:`app.core.energy_db`) is only touched at startup, during batched flushes, for the
+daily summary/series endpoints, and at shutdown.
+"""
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Dict
 from zoneinfo import ZoneInfo
 
 from ..devices.base import Reading
+from .energy_db import EnergyDB, PostgresBackend, SqliteBackend
 from .metrics import load_power, metric_value, solar_power
+
+
+def build_energy_store(settings) -> "EnergyStore":
+    """Build a PostgreSQL store when connection settings exist, otherwise use SQLite."""
+    conninfo = settings.postgres_conninfo()
+    backend: EnergyDB = (
+        PostgresBackend(conninfo) if conninfo else SqliteBackend(settings.energy_db_path)
+    )
+    return EnergyStore(backend, settings.timezone, settings.energy_retention_days)
 
 
 class EnergyStore:
     """Integrate in memory and periodically persist changed rows in one transaction.
 
-    The high-frequency poll path never queries SQLite. SQLite is used at startup,
+    The high-frequency poll path never queries the database. The database is used at startup,
     during batched write-behind flushes, for the low-frequency daily summary endpoint,
     and at shutdown.
     """
 
     MAX_SAMPLE_GAP_SECONDS = 300
 
-    def __init__(self, path: Path, timezone: str = "UTC", retention_days: int = 400):
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, backend, timezone: str = "UTC", retention_days: int = 400):
+        # Accept a ready EnergyDB backend, or a path-like for the SQLite default (keeps the
+        # simple ``EnergyStore(path, tz)`` form used by tests and local setups working).
+        self.db: EnergyDB = backend if isinstance(backend, EnergyDB) else SqliteBackend(backend)
         self.timezone = ZoneInfo(timezone)
         self.retention_days = max(retention_days, 1)
         self._lock = threading.Lock()
-        self._db = sqlite3.connect(path, check_same_thread=False, timeout=10)
-        self._db.row_factory = sqlite3.Row
 
         # (day, device_id) -> mutable aggregate values.
         self._daily: Dict[tuple[str, str], Dict[str, float]] = {}
@@ -42,66 +54,17 @@ class EnergyStore:
         self._dirty_state: set[str] = set()
         self._dirty_samples: set[tuple[str, int]] = set()
 
-        self._configure_database()
-        self._create_schema()
+        self.db.init_schema()
         self._load_cache()
-
-    def _configure_database(self) -> None:
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA synchronous=NORMAL")
-        self._db.execute("PRAGMA temp_store=MEMORY")
-        self._db.execute("PRAGMA busy_timeout=5000")
-
-    def _create_schema(self) -> None:
-        with self._db:
-            self._db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS daily_energy (
-                    day TEXT NOT NULL,
-                    device_id TEXT NOT NULL,
-                    solar_wh REAL NOT NULL DEFAULT 0,
-                    consumption_wh REAL NOT NULL DEFAULT 0,
-                    hardware_solar_wh REAL NOT NULL DEFAULT 0,
-                    updated_at REAL NOT NULL,
-                    PRIMARY KEY (day, device_id)
-                ) WITHOUT ROWID;
-
-                CREATE TABLE IF NOT EXISTS energy_state (
-                    device_id TEXT PRIMARY KEY,
-                    day TEXT NOT NULL,
-                    sample_ts REAL NOT NULL,
-                    solar_power_w REAL NOT NULL,
-                    load_power_w REAL NOT NULL
-                ) WITHOUT ROWID;
-
-                CREATE TABLE IF NOT EXISTS energy_samples (
-                    day TEXT NOT NULL,
-                    device_id TEXT NOT NULL,
-                    sample_ts INTEGER NOT NULL,
-                    solar_power_w REAL NOT NULL,
-                    load_power_w REAL NOT NULL,
-                    PRIMARY KEY (day, device_id, sample_ts)
-                ) WITHOUT ROWID;
-                """
-            )
 
     def _load_cache(self) -> None:
         cutoff = (
             datetime.now(self.timezone).date() - timedelta(days=self.retention_days - 1)
         ).isoformat()
-        with self._db:
-            self._db.execute("DELETE FROM daily_energy WHERE day < ?", (cutoff,))
-            self._db.execute("DELETE FROM energy_samples WHERE day < ?", (cutoff,))
-            rows = self._db.execute(
-                """
-                SELECT day, device_id, solar_wh, consumption_wh,
-                       hardware_solar_wh, updated_at
-                FROM daily_energy
-                WHERE day >= ?
-                """,
-                (cutoff,),
-            ).fetchall()
-            states = self._db.execute("SELECT * FROM energy_state").fetchall()
+        with self._lock:
+            self.db.purge_before(cutoff)
+            rows = self.db.load_daily(cutoff)
+            states = self.db.load_state()
 
         self._daily = {
             (row["day"], row["device_id"]): {
@@ -192,15 +155,7 @@ class EnergyStore:
         """
         selected_day = day or datetime.now(self.timezone).date().isoformat()
         with self._lock:
-            rows = self._db.execute(
-                """
-                SELECT device_id, solar_wh, consumption_wh
-                FROM daily_energy
-                WHERE day = ?
-                ORDER BY device_id
-                """,
-                (selected_day,),
-            ).fetchall()
+            rows = self.db.fetch_summary(selected_day)
             devices = [
                 {
                     "device_id": row["device_id"],
@@ -223,14 +178,7 @@ class EnergyStore:
         """Return minute-level solar/load power points for one local day."""
         selected_day = day or datetime.now(self.timezone).date().isoformat()
         with self._lock:
-            rows = self._db.execute(
-                """
-                SELECT device_id, sample_ts, solar_power_w, load_power_w
-                FROM energy_samples
-                WHERE day = ?
-                """,
-                (selected_day,),
-            ).fetchall()
+            rows = self.db.fetch_series(selected_day)
             by_device_sample = {
                 (row["device_id"], int(row["sample_ts"])): {
                     "sample_ts": int(row["sample_ts"]),
@@ -268,7 +216,7 @@ class EnergyStore:
         return {"date": selected_day, "points": points}
 
     def flush(self) -> int:
-        """Persist all changed aggregates and states in one SQLite transaction."""
+        """Persist all changed aggregates and states in one database transaction."""
         with self._lock:
             if not self._dirty_daily and not self._dirty_state and not self._dirty_samples:
                 return 0
@@ -305,45 +253,7 @@ class EnergyStore:
                 for device_id, sample_ts in self._dirty_samples
             ]
 
-            with self._db:
-                self._db.executemany(
-                    """
-                    INSERT INTO daily_energy (
-                        day, device_id, solar_wh, consumption_wh,
-                        hardware_solar_wh, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(day, device_id) DO UPDATE SET
-                        solar_wh = excluded.solar_wh,
-                        consumption_wh = excluded.consumption_wh,
-                        hardware_solar_wh = excluded.hardware_solar_wh,
-                        updated_at = excluded.updated_at
-                    """,
-                    daily_rows,
-                )
-                self._db.executemany(
-                    """
-                    INSERT INTO energy_state (
-                        device_id, day, sample_ts, solar_power_w, load_power_w
-                    ) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(device_id) DO UPDATE SET
-                        day = excluded.day,
-                        sample_ts = excluded.sample_ts,
-                        solar_power_w = excluded.solar_power_w,
-                        load_power_w = excluded.load_power_w
-                    """,
-                    state_rows,
-                )
-                self._db.executemany(
-                    """
-                    INSERT INTO energy_samples (
-                        day, device_id, sample_ts, solar_power_w, load_power_w
-                    ) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(day, device_id, sample_ts) DO UPDATE SET
-                        solar_power_w = excluded.solar_power_w,
-                        load_power_w = excluded.load_power_w
-                    """,
-                    sample_rows,
-                )
+            self.db.write(daily_rows, state_rows, sample_rows)
 
             flushed_samples = set(self._dirty_samples)
             self._dirty_daily.clear()
@@ -356,4 +266,4 @@ class EnergyStore:
     def close(self) -> None:
         self.flush()
         with self._lock:
-            self._db.close()
+            self.db.close()

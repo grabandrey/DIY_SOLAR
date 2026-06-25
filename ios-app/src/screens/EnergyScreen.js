@@ -32,6 +32,11 @@ import {
 } from "../metrics";
 import { deviceImageSource } from "../deviceImages";
 import { useDeviceNames, resolveDeviceName } from "../deviceNames";
+import {
+  useDeviceIcons,
+  resolveDeviceIcon,
+  resolveDeviceIconStyle,
+} from "../deviceIcons";
 import { useDeviceOrder, orderReadings } from "../deviceOrder";
 import ReorderModal from "../components/ReorderModal";
 import GlassCard from "../components/GlassCard";
@@ -85,13 +90,16 @@ function DeviceListScreen({ navigation }) {
   const { t } = useTranslation();
   const background = useCurrentBackground();
   const { readings } = useReadings();
-  // Device configs carry the chosen image (cfg.image); join by id to show it.
-  // Daisy-chained units report ids like "<masterId>:<n>", so strip the suffix to reuse
-  // the master device's image for every unit in the chain.
+  // Icons are picked on the device page and stored locally (AsyncStorage), keyed by
+  // device_id. Daisy-chained units report ids like "<masterId>:<n>"; resolveDeviceIcon
+  // falls back to the master's icon for every unit in the chain. A legacy backend-configured
+  // image (cfg.image) is used only as a last-resort fallback.
   const { devices } = useDiscovery();
+  const { icons } = useDeviceIcons();
   const imageOf = (id) => {
     const masterId = String(id).split(":")[0];
-    return devices.find((d) => d.id === masterId)?.image;
+    const backend = devices.find((d) => d.id === masterId)?.image;
+    return resolveDeviceIcon(icons, id, backend);
   };
   // Apply the user's saved order (set from the reorder modal); unordered devices fall back
   // to alphabetical by name.
@@ -289,11 +297,17 @@ function DeviceCarousel({ title, devices, type, onOpen, imageOf, t }) {
 // Floats above the info card (absolutely positioned); most of it sits outside the card.
 // Shows the device photo only — no placeholder icon while/if the image is unavailable.
 function DeviceArt({ reading, type, image }) {
+  const { iconStyles } = useDeviceIcons();
   const source = deviceImageSource(image);
   if (!source) return null;
+  // Vertical batteries render at the inverter image size (the default artShadow); horizontal
+  // batteries render much smaller. Inverters always use artShadow.
+  const horizontal =
+    type === "battery" &&
+    resolveDeviceIconStyle(iconStyles, reading.device_id) === "horizontal";
   return (
     <View
-      style={[styles.art, type === "battery" && styles.artBattery]}
+      style={[styles.art, horizontal && styles.artBattery]}
       pointerEvents="none"
     >
       {/* Shadow lives on this wrapper View, not the Image — an Image clips its own
@@ -301,7 +315,7 @@ function DeviceArt({ reading, type, image }) {
       <View
         style={[
           styles.artShadow,
-          type === "battery" && styles.artShadowBattery,
+          horizontal && styles.artShadowHorizontal,
           !reading.online && styles.artImageOffline,
         ]}
       >
@@ -537,7 +551,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     zIndex: 2,
   },
-  // Battery photos read better sitting lower over the card than the inverters.
+  // Horizontal battery photos read better sitting a little lower over the card. Vertical
+  // batteries use the inverter position (top: 0) so they sit higher, like an inverter.
   artBattery: { top: 20 },
   // Drop shadow on the wrapper (shaped by the child image's alpha). A View doesn't clip
   // its shadow, so the bottom of the shadow stays fully visible.
@@ -549,8 +564,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.45,
     shadowRadius: 16,
   },
-  // Battery photos render larger than the inverters.
-  artShadowBattery: { width: "130%", height: "170%" },
+  // Horizontal battery style: a large, wide image (bigger than the inverter-sized vertical
+  // style), sitting a little lower over the card (see artBattery).
+  artShadowHorizontal: { width: "66%", height: "84%" },
   artImage: { width: "100%", height: "100%" },
   artImageOffline: { opacity: 0.35 },
 
