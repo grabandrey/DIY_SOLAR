@@ -1,5 +1,5 @@
 import React from "react";
-import { View, Text, ScrollView, StyleSheet } from "react-native";
+import { View, Text, ScrollView, StyleSheet, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import { colors, radius } from "../theme";
@@ -11,6 +11,8 @@ import TimeGradientBackground from "../components/TimeGradientBackground";
 export default function AnalyticsScreen() {
   const insets = useSafeAreaInsets();
   const { t } = useTranslation();
+  const { width } = useWindowDimensions();
+  const chartWidth = Math.max(280, width - 32);
   const live = useLive();
   const series = useTimeSeries(
     () => ({
@@ -39,7 +41,9 @@ export default function AnalyticsScreen() {
           <Text style={styles.cardValue}>
             {kw(latest.charged)} <Text style={styles.cardUnit}>kW</Text>
           </Text>
-          <LineChart data={charged} color={colors.yellowDeep} />
+          <View style={styles.chartEdge}>
+            <LineChart data={charged} color={colors.yellowDeep} width={chartWidth} />
+          </View>
         </View>
 
         <View style={[styles.card, { marginTop: 14 }]}>
@@ -47,7 +51,9 @@ export default function AnalyticsScreen() {
           <Text style={styles.cardValue}>
             {kw(latest.used)} <Text style={styles.cardUnit}>kW</Text>
           </Text>
-          <LineChart data={used} color={colors.orange} />
+          <View style={styles.chartEdge}>
+            <LineChart data={used} color={colors.orange} width={chartWidth} />
+          </View>
         </View>
       </ScrollView>
     </TimeGradientBackground>
@@ -68,4 +74,5 @@ const styles = StyleSheet.create({
   cardLabel: { color: colors.muted, fontSize: 14 },
   cardValue: { color: colors.ink, fontSize: 30, fontWeight: "800", letterSpacing: -1, marginVertical: 6 },
   cardUnit: { fontSize: 18, fontWeight: "700" },
+  chartEdge: { marginHorizontal: -18 },
 });

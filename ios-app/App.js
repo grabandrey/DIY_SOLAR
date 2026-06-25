@@ -6,6 +6,8 @@ import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 
 import { BackendProvider } from "./src/api";
 import { ProfileProvider } from "./src/profile";
+import { DeviceNamesProvider } from "./src/deviceNames";
+import { DeviceOrderProvider } from "./src/deviceOrder";
 import { colors } from "./src/theme";
 import { useCurrentBackground, statusBarStyleForKey } from "./src/background";
 import TabBar from "./src/components/TabBar";
@@ -32,6 +34,8 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <ProfileProvider>
+        <DeviceNamesProvider>
+        <DeviceOrderProvider>
         <BackendProvider>
           <TimeAwareStatusBar />
           <NavigationContainer theme={navTheme}>
@@ -49,6 +53,8 @@ export default function App() {
             </Tab.Navigator>
           </NavigationContainer>
         </BackendProvider>
+        </DeviceOrderProvider>
+        </DeviceNamesProvider>
       </ProfileProvider>
     </SafeAreaProvider>
   );

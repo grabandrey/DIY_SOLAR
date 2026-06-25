@@ -97,6 +97,7 @@ export default function LineChart({
   data = [],
   height = 120,
   color = colors.yellowDeep,
+  labelColor = "#4A3A08",
   timeSpan = null,
   fillId = "lcfill",
   valueLabel = null,
@@ -150,7 +151,12 @@ export default function LineChart({
     value: values[index],
   }));
   const line = smoothPath(coords);
-  const area = `${line} L ${W} ${H} L 0 ${H} Z`;
+  const firstX = coords[0][0];
+  const lastX = coords[coords.length - 1][0];
+  // Close the fill directly below the trace endpoints. Using the chart corners
+  // here creates diagonal wedges whenever the visible series starts or ends
+  // inside the viewport.
+  const area = `${line} L ${lastX.toFixed(1)} ${H} L ${firstX.toFixed(1)} ${H} Z`;
   const latestPoint = plotted[plotted.length - 1];
   const scrubPoint = scrubX == null ? null : interpolatePoint(plotted, scrubX);
   const activePoint = scrubPoint ?? latestPoint;
@@ -290,7 +296,7 @@ export default function LineChart({
             <SvgText
               x={labelX + labelW / 2}
               y={labelY + 14}
-              fill="#4A3A08"
+              fill={labelColor}
               fontSize="10"
               fontWeight="800"
               textAnchor="middle"
@@ -325,7 +331,7 @@ export default function LineChart({
             <SvgText
               x={centerLabelX + centerLabelW / 2}
               y={centerLabelY + 14}
-              fill="#4A3A08"
+              fill={labelColor}
               fontSize="10"
               fontWeight="800"
               textAnchor="middle"

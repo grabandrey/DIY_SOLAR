@@ -1,4 +1,4 @@
-import React, { useRef } from "react";
+import React, { useRef, useState } from "react";
 import {
   View,
   Text,
@@ -12,7 +12,9 @@ import {
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
+import { StatusBar } from "expo-status-bar";
 import MaskedView from "@react-native-masked-view/masked-view";
+import Svg, { Circle, Path } from "react-native-svg";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -29,8 +31,10 @@ import {
   kw,
 } from "../metrics";
 import { deviceImageSource } from "../deviceImages";
+import { useDeviceNames, resolveDeviceName } from "../deviceNames";
+import { useDeviceOrder, orderReadings } from "../deviceOrder";
+import ReorderModal from "../components/ReorderModal";
 import GlassCard from "../components/GlassCard";
-import TimeGradientBackground from "../components/TimeGradientBackground";
 import DeviceDetail from "../components/DeviceDetail";
 
 const Stack = createNativeStackNavigator();
@@ -89,11 +93,10 @@ function DeviceListScreen({ navigation }) {
     const masterId = String(id).split(":")[0];
     return devices.find((d) => d.id === masterId)?.image;
   };
-  // Alphabetical by display name (falling back to id) so the carousel order is stable
-  // and predictable regardless of the backend's device ids.
-  const sorted = [...readings].sort((a, b) =>
-    (a.device_name || a.device_id).localeCompare(b.device_name || b.device_id)
-  );
+  // Apply the user's saved order (set from the reorder modal); unordered devices fall back
+  // to alphabetical by name.
+  const { order } = useDeviceOrder();
+  const sorted = orderReadings(order, readings);
   const inverters = sorted.filter((reading) => reading.kind !== "bms");
   const batteries = sorted.filter((reading) => reading.kind === "bms");
 
@@ -101,6 +104,7 @@ function DeviceListScreen({ navigation }) {
     navigation.navigate("DeviceDetail", {
       deviceId: reading.device_id,
       initialReading: reading,
+      image: imageOf(reading.device_id),
     });
 
   return (
@@ -118,7 +122,7 @@ function DeviceListScreen({ navigation }) {
       />
       <ScrollView
         style={styles.scroll}
-        contentContainerStyle={{ paddingTop: insets.top + 56, paddingBottom: 140 }}
+        contentContainerStyle={{ paddingTop: insets.top + 14, paddingBottom: 140 }}
         showsVerticalScrollIndicator={false}
       >
         {sorted.length === 0 && (
@@ -130,6 +134,7 @@ function DeviceListScreen({ navigation }) {
 
         {inverters.length > 0 && (
           <DeviceCarousel
+            title={t("energy.inverters")}
             devices={inverters}
             type="inverter"
             onOpen={openDevice}
@@ -140,6 +145,7 @@ function DeviceListScreen({ navigation }) {
 
         {batteries.length > 0 && (
           <DeviceCarousel
+            title={t("energy.batteries")}
             devices={batteries}
             type="battery"
             onOpen={openDevice}
@@ -154,8 +160,11 @@ function DeviceListScreen({ navigation }) {
 
 // A horizontal, paged carousel of large device images. Each page is a self-contained
 // card; the only chrome is the page-dots beneath the scroll.
-function DeviceCarousel({ devices, type, onOpen, imageOf, t }) {
+function DeviceCarousel({ title, devices, type, onOpen, imageOf, t }) {
   const { width } = useWindowDimensions();
+  const { names } = useDeviceNames();
+  const { setOrder } = useDeviceOrder();
+  const [reordering, setReordering] = useState(false);
   // Full-bleed pages so `pagingEnabled` (which snaps by the scroll view's frame width)
   // aligns exactly; the side gutters live inside each page instead.
   const pageWidth = width;
@@ -166,8 +175,47 @@ function DeviceCarousel({ devices, type, onOpen, imageOf, t }) {
     { useNativeDriver: false }
   );
 
+  const reorderItems = devices.map((reading) => ({
+    id: reading.device_id,
+    name: resolveDeviceName(names, reading),
+    image: imageOf?.(reading.device_id),
+  }));
+
   return (
     <View style={styles.section}>
+      <View style={styles.sectionHeader}>
+        <Text
+          style={[styles.sectionTitle, type === "inverter" && styles.sectionTitleInverter]}
+        >
+          {title}
+        </Text>
+        {devices.length > 1 && (
+          <Pressable
+            onPress={() => setReordering(true)}
+            hitSlop={12}
+            accessibilityRole="button"
+            accessibilityLabel={t("settings.reorderHint")}
+          >
+            <GlassCard
+              style={styles.reorderPill}
+              glassStyle="clear"
+              tint="rgba(0,0,0,0.16)"
+              blur={8}
+              border="rgba(255,255,255,0.4)"
+              radius={radius.pill}
+            >
+              <Text style={styles.reorderLabel}>{t("common.edit")}</Text>
+            </GlassCard>
+          </Pressable>
+        )}
+      </View>
+      <ReorderModal
+        visible={reordering}
+        title={title}
+        items={reorderItems}
+        onClose={() => setReordering(false)}
+        onSave={(ids) => setOrder(ids)}
+      />
       <Animated.ScrollView
         horizontal
         pagingEnabled
@@ -198,7 +246,7 @@ function DeviceCarousel({ devices, type, onOpen, imageOf, t }) {
               onPress={() => onOpen(reading)}
               accessibilityRole="button"
               accessibilityLabel={t("device.open", {
-                name: reading.device_name || reading.device_id,
+                name: resolveDeviceName(names, reading),
               })}
             >
               <Animated.View style={[styles.pageInner, { opacity, transform: [{ scale }] }]}>
@@ -210,12 +258,15 @@ function DeviceCarousel({ devices, type, onOpen, imageOf, t }) {
                   border="rgba(255,255,255,0.45)"
                   radius={radius.xl}
                 >
+                  <View
+                    style={[
+                      styles.cardStatusDot,
+                      !reading.online && styles.statusOffline,
+                    ]}
+                  />
                   <View style={styles.nameRow}>
-                    <View
-                      style={[styles.statusDot, !reading.online && styles.statusOffline]}
-                    />
                     <Text style={styles.name} numberOfLines={1}>
-                      {reading.device_name || reading.device_id}
+                      {resolveDeviceName(names, reading)}
                     </Text>
                     <Ionicons name="chevron-forward" size={16} color="rgba(255,255,255,0.8)" />
                   </View>
@@ -260,26 +311,79 @@ function DeviceArt({ reading, type, image }) {
   );
 }
 
+// Exact paths from the downloaded Lucide sun and house-plug SVG assets.
+function StatIcon({ name }) {
+  return (
+    <Svg
+      width={24}
+      height={24}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={colors.white}
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={styles.statIcon}
+    >
+      {name === "solar" ? (
+        <>
+          <Circle cx="12" cy="12" r="4" />
+          <Path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+        </>
+      ) : name === "load" ? (
+        <>
+          <Path d="M10 12V8.964M14 12V8.964" />
+          <Path d="M15 12a1 1 0 0 1 1 1v2a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2a1 1 0 0 1 1-1z" />
+          <Path d="M8.5 21H5a2 2 0 0 1-2-2v-9a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2h-5a2 2 0 0 1-2-2v-2" />
+        </>
+      ) : name === "battery-voltage" ? (
+        <>
+          <Path d="m11 7-3 5h4l-3 5" />
+          <Path d="M14.856 6H16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.935M22 14v-4M5.14 18H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2.936" />
+        </>
+      ) : name === "battery-current" ? (
+        <Path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2" />
+      ) : (
+        <>
+          <Path d="m12 14 4-4" />
+          <Path d="M3.34 19a10 10 0 1 1 17.32 0" />
+        </>
+      )}
+    </Svg>
+  );
+}
+
 // Page indicator whose active dot grows and slides as the carousel scrolls. Each dot's
 // width/opacity is interpolated from the live scroll offset, so the elongated "pill"
 // travels smoothly between dots instead of snapping.
 function Dots({ count, scrollX, pageWidth }) {
   return (
-    <View style={styles.dots}>
-      {Array.from({ length: count }).map((_, i) => {
-        const inputRange = [(i - 1) * pageWidth, i * pageWidth, (i + 1) * pageWidth];
-        const width = scrollX.interpolate({
-          inputRange,
-          outputRange: [7, 22, 7],
-          extrapolate: "clamp",
-        });
-        const opacity = scrollX.interpolate({
-          inputRange,
-          outputRange: [0.25, 1, 0.25],
-          extrapolate: "clamp",
-        });
-        return <Animated.View key={i} style={[styles.dot, { width, opacity }]} />;
-      })}
+    <View style={styles.dotsWrap}>
+      <GlassCard
+        style={styles.dotsPill}
+        glassStyle="clear"
+        tint="rgba(0,0,0,0.18)"
+        blur={8}
+        border="rgba(255,255,255,0.4)"
+        radius={radius.pill}
+      >
+        <View style={styles.dotsRow}>
+          {Array.from({ length: count }).map((_, i) => {
+            const inputRange = [(i - 1) * pageWidth, i * pageWidth, (i + 1) * pageWidth];
+            const width = scrollX.interpolate({
+              inputRange,
+              outputRange: [7, 22, 7],
+              extrapolate: "clamp",
+            });
+            const opacity = scrollX.interpolate({
+              inputRange,
+              outputRange: [0.25, 1, 0.25],
+              extrapolate: "clamp",
+            });
+            return <Animated.View key={i} style={[styles.dot, { width, opacity }]} />;
+          })}
+        </View>
+      </GlassCard>
     </View>
   );
 }
@@ -289,26 +393,58 @@ function FocusedStats({ reading, type, t }) {
   const stats =
     type === "battery"
       ? [
-          { label: t("device.metrics.batteryVoltage"), value: batteryVoltage(reading).toFixed(1), unit: "V" },
-          { label: t("home.batteryCurrent"), value: batteryCurrent(reading).toFixed(1), unit: "A" },
-          { label: t("device.metrics.batteryPower"), value: kw(Math.abs(batteryPower(reading))), unit: "kW" },
+          {
+            label: t("device.metrics.batteryVoltage"),
+            icon: "battery-voltage",
+            value: batteryVoltage(reading).toFixed(1),
+            unit: "V",
+          },
+          {
+            label: t("home.batteryCurrent"),
+            icon: "battery-current",
+            value: batteryCurrent(reading).toFixed(1),
+            unit: "A",
+          },
+          {
+            label: t("device.metrics.batteryPower"),
+            icon: "battery-power",
+            value: kw(Math.abs(batteryPower(reading))),
+            unit: "kW",
+          },
         ]
       : [
-          { label: t("energy.solar"), value: kw(chargePower(reading)), unit: "kW" },
-          { label: t("energy.load"), value: kw(usedPower(reading)), unit: "kW" },
+          {
+            label: t("energy.solar"),
+            icon: "solar",
+            value: kw(chargePower(reading)),
+            unit: "kW",
+          },
+          {
+            label: t("energy.load"),
+            icon: "load",
+            value: kw(usedPower(reading)),
+            unit: "kW",
+          },
         ];
 
   return (
     <View style={styles.stats}>
       {stats.map((stat) => (
-        <View key={stat.label} style={styles.stat}>
+        <View
+          key={stat.label}
+          style={styles.stat}
+          accessibilityLabel={`${stat.label}: ${stat.value} ${stat.unit}`}
+        >
+          {stat.icon ? <StatIcon name={stat.icon} /> : null}
           <Text style={styles.statValue}>
             {stat.value}
             {stat.unit ? <Text style={styles.statUnit}> {stat.unit}</Text> : null}
           </Text>
-          <Text style={styles.statLabel} numberOfLines={1}>
-            {stat.label}
-          </Text>
+          {!stat.icon ? (
+            <Text style={styles.statLabel} numberOfLines={1}>
+              {stat.label}
+            </Text>
+          ) : null}
         </View>
       ))}
     </View>
@@ -317,14 +453,19 @@ function FocusedStats({ reading, type, t }) {
 
 function DeviceDetailScreen({ route, navigation }) {
   const { readings } = useReadings();
-  const { deviceId, initialReading } = route.params;
+  const { deviceId, initialReading, image } = route.params;
   const reading =
     readings.find((item) => item.device_id === deviceId) || initialReading;
 
   return (
-    <TimeGradientBackground>
-      <DeviceDetail reading={reading} onBack={() => navigation.goBack()} />
-    </TimeGradientBackground>
+    <>
+      <StatusBar style="dark" />
+      <DeviceDetail
+        reading={reading}
+        image={image}
+        onBack={() => navigation.goBack()}
+      />
+    </>
   );
 }
 
@@ -335,6 +476,29 @@ const styles = StyleSheet.create({
   topBlur: { position: "absolute", top: 0, left: 0, right: 0, height: 100 },
   screen: { flex: 1, backgroundColor: "#1B1B19" },
   scroll: { flex: 1, backgroundColor: "transparent" },
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    paddingHorizontal: SCREEN_PADDING,
+    marginBottom: 16,
+  },
+  sectionTitle: {
+    color: colors.white,
+    fontSize: 52,
+    fontWeight: "200",
+    letterSpacing: -0.8,
+    flexShrink: 1,
+  },
+  sectionTitleInverter: { paddingBottom: 24 },
+  reorderPill: {
+    marginTop: 14,
+    minHeight: 34,
+    paddingHorizontal: 13,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  reorderLabel: { color: colors.white, fontSize: 13, fontWeight: "700" },
   empty: { alignItems: "center", gap: 10, paddingVertical: 60, paddingHorizontal: SCREEN_PADDING },
   emptyText: { color: WHITE_DIM, fontSize: 14, textAlign: "center", maxWidth: 220 },
 
@@ -390,13 +554,10 @@ const styles = StyleSheet.create({
   artImage: { width: "100%", height: "100%" },
   artImageOffline: { opacity: 0.35 },
 
-  dots: {
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    gap: 7,
-    marginTop: 18,
-  },
+  // Dots live in a clear-glass pill, tucked up close to the carousel.
+  dotsWrap: { alignItems: "center", marginTop: 2 },
+  dotsPill: { paddingVertical: 12, paddingHorizontal: 14 },
+  dotsRow: { flexDirection: "row", alignItems: "center", gap: 7 },
   dot: { height: 7, borderRadius: 4, backgroundColor: colors.white },
 
   nameRow: {
@@ -405,7 +566,15 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 7,
   },
-  statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.green },
+  cardStatusDot: {
+    position: "absolute",
+    top: 16,
+    right: 16,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.green,
+  },
   statusOffline: { backgroundColor: colors.red },
   name: { color: colors.white, fontSize: 23, fontWeight: "700", flexShrink: 1 },
 
@@ -416,6 +585,7 @@ const styles = StyleSheet.create({
     marginTop: 18,
   },
   stat: { alignItems: "center", flex: 1 },
+  statIcon: { marginBottom: 7 },
   statValue: { color: colors.white, fontSize: 20, fontWeight: "800", letterSpacing: -0.4 },
   statUnit: { color: WHITE_DIM, fontSize: 12, fontWeight: "700" },
   statLabel: { color: WHITE_DIM, fontSize: 12, marginTop: 4 },

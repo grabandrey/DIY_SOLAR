@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
   View,
   Text,
@@ -20,15 +20,29 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
 import { colors } from "../theme";
 import { sunTimesForDate, useCurrentBackground } from "../background";
-import { useDailyEnergy, useEnergySeries, useLive, useReadings } from "../api";
+import {
+  useDailyEnergy,
+  useEnergySeries,
+  useLive,
+  useReadings,
+} from "../api";
 import { useProfile } from "../profile";
 import { batteryVoltage, batteryCurrent, kw } from "../metrics";
+import { useDeviceNames, resolveDeviceName } from "../deviceNames";
+import { useDeviceOrder, orderReadings } from "../deviceOrder";
 import GlassCard from "../components/GlassCard";
 import LiveStat from "../components/LiveStat";
 import BatteryInfoSheet from "../components/BatteryInfoSheet";
 import LineChart from "../components/LineChart";
 
 const glass = isLiquidGlassAvailable();
+
+// Sage green for the solar production graph (trace + fill) and its toggle, and a
+// subtle red for the load graph and its toggle — both softened a touch.
+const SOLAR_GREEN = "#86C9A1";
+const LOAD_RED = "#E59FB4";
+
+const ENERGY_CHART_HEIGHT = 188;
 
 // Estimate a 0..1 charge level from a pack voltage, choosing the range from the
 // nominal system voltage (12V / 24V / 48V LiFePO4).
@@ -46,108 +60,209 @@ function batteryFill(v) {
   return Math.max(0, Math.min(1, (v - min) / (max - min)));
 }
 
-// Charge-level gradient (top → bottom): red when low, amber mid, green when full.
-function fillGradient(fill) {
-  if (fill < 0.2) return ["#FF6B6B", "#EF4444"];
-  if (fill < 0.45) return ["#FF9A5A", "#FF7A3C"];
-  if (fill < 0.75) return ["#FCE36B", "#F6D03B"];
-  return ["#5BE584", "#34C759"];
+// Liquid colors by charge level (from voltage): red when low, amber mid, green full.
+// Softer / desaturated tones, kept semi-transparent so they read calm, not harsh.
+// The waves use the SAME hue as the main liquid at a low opacity, so they only add
+// gentle motion and never form a visible separation line against the body.
+function fluidColors(fill) {
+  if (fill < 0.2)
+    return {
+      gradient: ["rgba(216,150,150,0.34)", "rgba(196,108,108,0.42)"],
+      wave: "rgba(196,108,108,0.24)",
+      waveTop: "rgba(216,150,150,0.15)",
+    };
+  if (fill < 0.45)
+    return {
+      gradient: ["rgba(222,172,134,0.34)", "rgba(206,146,104,0.42)"],
+      wave: "rgba(206,146,104,0.24)",
+      waveTop: "rgba(222,172,134,0.15)",
+    };
+  if (fill < 0.75)
+    return {
+      gradient: ["rgba(220,202,140,0.34)", "rgba(202,180,108,0.42)"],
+      wave: "rgba(202,180,108,0.24)",
+      waveTop: "rgba(220,202,140,0.15)",
+    };
+  return {
+    gradient: ["rgba(91,229,132,0.4)", "rgba(52,199,89,0.48)"],
+    wave: "rgba(52,199,89,0.28)",
+    waveTop: "rgba(124,240,164,0.18)",
+  };
 }
 
-const BATTERY_H = 66;
-const BATTERY_W = 40;
-const BATTERY_CAP_W = 16;
-const BATTERY_CAP_H = 5;
-const PARTICLE_COUNT = 6;
-const ENERGY_CHART_HEIGHT = 188;
-
-// Particles drifting inside the filled part of the battery: up while charging
-// (+A), down while discharging (-A). `direction` is +1 (up) or -1 (down);
-// `height` is the colored region's height in px.
-function Particles({ direction, height }) {
-  const dots = useRef(
-    Array.from({ length: PARTICLE_COUNT }, () => ({
-      anim: new Animated.Value(0),
-      x: 4 + Math.random() * (BATTERY_W - 12),
-      size: 3 + Math.random() * 2.5,
-      duration: 1500 + Math.random() * 1500,
-    }))
-  ).current;
+// The green water inside a battery cell. Two large rounded squares slowly counter-
+// rotate at the surface so their curved edges undulate like a wave. The fluid is
+// inset from the cell walls and sits behind the glass body.
+function BatteryFluid({ fill, online }) {
+  const spinA = useRef(new Animated.Value(0)).current;
+  const spinB = useRef(new Animated.Value(0)).current;
+  // Randomized per-battery so no two cells wave in sync: each starts at a random
+  // angle (phase) and runs at a slightly different speed.
+  const rng = useRef({
+    phaseA: Math.random() * 360,
+    phaseB: Math.random() * 360,
+    durA: 6000 + Math.random() * 4000,
+    durB: 8000 + Math.random() * 4000,
+  }).current;
 
   useEffect(() => {
-    const loops = dots.map((d) =>
+    const loops = [
       Animated.loop(
-        Animated.timing(d.anim, {
+        Animated.timing(spinA, {
           toValue: 1,
-          duration: d.duration,
+          duration: rng.durA,
           easing: Easing.linear,
           useNativeDriver: true,
         })
-      )
-    );
-    const timers = dots.map((d, i) =>
-      setTimeout(() => loops[i].start(), Math.random() * d.duration)
-    );
-    return () => {
-      timers.forEach(clearTimeout);
-      loops.forEach((l) => l.stop());
-    };
-  }, [direction, height]);
+      ),
+      Animated.loop(
+        Animated.timing(spinB, {
+          toValue: 1,
+          duration: rng.durB,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        })
+      ),
+    ];
+    loops.forEach((l) => l.start());
+    return () => loops.forEach((l) => l.stop());
+  }, [spinA, spinB, rng]);
+
+  // 0 and 360 align, so the loop stays seamless while the phase offset shifts where
+  // each cell's wave starts.
+  const rotA = spinA.interpolate({
+    inputRange: [0, 1],
+    outputRange: [`${rng.phaseA}deg`, `${rng.phaseA + 360}deg`],
+  });
+  const rotB = spinB.interpolate({
+    inputRange: [0, 1],
+    outputRange: [`${rng.phaseB}deg`, `${rng.phaseB - 360}deg`],
+  });
+  // Color the liquid by charge level when online; muted white when offline.
+  const palette = online
+    ? fluidColors(fill)
+    : {
+        gradient: ["rgb(200,202,205)", "rgb(176,178,182)"],
+        wave: "rgba(176,178,182,0.36)",
+        waveTop: "rgba(200,202,205,0.22)",
+      };
 
   return (
-    <View style={[styles.particleLayer, { height }]} pointerEvents="none">
-      {dots.map((d, i) => {
-        const from = direction > 0 ? height : -d.size;
-        const to = direction > 0 ? -d.size : height;
-        return (
-          <Animated.View
-            key={i}
-            style={{
-              position: "absolute",
-              left: d.x,
-              width: d.size,
-              height: d.size,
-              borderRadius: d.size / 2,
-              backgroundColor: "rgba(255,255,255,0.9)",
-              opacity: d.anim.interpolate({
-                inputRange: [0, 0.15, 0.85, 1],
-                outputRange: [0, 1, 1, 0],
-              }),
-              transform: [
-                { translateY: d.anim.interpolate({ inputRange: [0, 1], outputRange: [from, to] }) },
-              ],
-            }}
-          />
-        );
-      })}
+    <View style={styles.batteryFluidTrack} pointerEvents="none">
+      <View style={[styles.batteryFluid, { height: `${Math.round(fill * 100)}%` }]}>
+        <LinearGradient
+          colors={palette.gradient}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 0, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+        <Animated.View
+          style={[
+            styles.batteryWave,
+            {
+              backgroundColor: palette.wave,
+              transform: [{ rotate: rotA }],
+            },
+          ]}
+        />
+        <Animated.View
+          style={[
+            styles.batteryWave,
+            styles.batteryWaveTop,
+            {
+              backgroundColor: palette.waveTop,
+              transform: [{ rotate: rotB }],
+            },
+          ]}
+        />
+      </View>
     </View>
   );
 }
 
-// A minimal vertical bar that fills from the bottom; the fill is a gradient whose
-// color varies with voltage. Particles drift up/down inside based on current flow.
-function BatteryBar({ voltage, current, online, label }) {
-  const fill = batteryFill(voltage);
-  const gradient = online
-    ? fillGradient(fill)
-    : ["rgba(255,255,255,0.28)", "rgba(255,255,255,0.18)"];
-  const direction = current > 0.05 ? 1 : current < -0.05 ? -1 : 0;
-  const fillPx = Math.round(fill * BATTERY_H);
+// A single battery in the home-screen carousel: a clear-glass cell sitting over a
+// green fluid whose level tracks the battery voltage. Tapping opens the info sheet.
+function BatteryItem({ reading, name, online, onPress, width }) {
+  const fill = batteryFill(batteryVoltage(reading));
   return (
-    <View style={styles.batteryUnit}>
-      <View style={styles.batteryCap} />
-      <View style={styles.batteryBody}>
-        <LinearGradient
-          colors={gradient}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 0, y: 1 }}
-          style={[styles.batteryFill, { height: fillPx }]}
-        />
-        {online && direction !== 0 && fillPx > 6 ? (
-          <Particles direction={direction} height={fillPx} />
-        ) : null}
-        <Text style={styles.batteryIndexLabel}>{label}</Text>
+    <Pressable
+      style={({ pressed }) => [
+        styles.batteryItem,
+        { width },
+        pressed && styles.batteryItemPressed,
+      ]}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={name}
+    >
+      <View style={[styles.batteryCell, !online && styles.batteryCellOffline]}>
+        <View style={styles.batteryCap} />
+        <View style={styles.batteryShape}>
+          {/* Green animated fluid, sitting under the glass. */}
+          <BatteryFluid fill={fill} online={online} />
+          {/* Clear glass body, rendered last so it stays on top of the fluid. The
+              glass carries its own corner radius so its refraction follows the
+              rounded corners instead of being clipped at square ones. */}
+          {glass ? (
+            <GlassView
+              glassEffectStyle="clear"
+              style={[StyleSheet.absoluteFill, styles.batteryGlass]}
+              pointerEvents="none"
+            />
+          ) : (
+            <View
+              style={[StyleSheet.absoluteFill, styles.batteryGlass, styles.batteryGlassFallback]}
+              pointerEvents="none"
+            />
+          )}
+        </View>
       </View>
+      <Text style={styles.batteryName} numberOfLines={1}>
+        {name}
+      </Text>
+      <View style={styles.batteryReadouts}>
+        <View style={styles.batteryReadout}>
+          <LiveStat
+            value={batteryVoltage(reading).toFixed(1)}
+            unit="V"
+            valueStyle={styles.batteryVoltValue}
+            unitStyle={styles.batteryVoltUnit}
+            gap={2}
+          />
+        </View>
+        <View style={styles.batteryReadout}>
+          <LiveStat
+            value={batteryCurrent(reading).toFixed(1)}
+            unit="A"
+            valueStyle={styles.batteryAmpValue}
+            unitStyle={styles.batteryAmpUnit}
+            gap={2}
+          />
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+// Page indicator for the battery carousel: the dot for the leftmost-visible item
+// grows into a pill and slides as you scroll. `stride` is one item + gutter.
+function BatteryDots({ count, scrollX, stride }) {
+  return (
+    <View style={styles.batteryDotsRow}>
+      {Array.from({ length: count }).map((_, i) => {
+        const inputRange = [(i - 1) * stride, i * stride, (i + 1) * stride];
+        const width = scrollX.interpolate({
+          inputRange,
+          outputRange: [6, 18, 6],
+          extrapolate: "clamp",
+        });
+        const opacity = scrollX.interpolate({
+          inputRange,
+          outputRange: [0.3, 1, 0.3],
+          extrapolate: "clamp",
+        });
+        return <Animated.View key={i} style={[styles.batteryDot, { width, opacity }]} />;
+      })}
     </View>
   );
 }
@@ -169,14 +284,14 @@ function HeaderGlass({ children, style }) {
   );
 }
 
-function RangeToggle({ value, onChange }) {
+function RangeToggle({ value, onChange, accent = SOLAR_GREEN }) {
   return (
     <View style={styles.rangeSwitchRow}>
       <Text style={styles.rangeSwitchText}>{value === "hour" ? "Hour" : "Day"}</Text>
       <Switch
         value={value === "hour"}
         onValueChange={(enabled) => onChange(enabled ? "hour" : "day")}
-        trackColor={{ false: colors.cardAlt, true: colors.yellowDeep }}
+        trackColor={{ false: colors.cardAlt, true: accent }}
         thumbColor={colors.white}
         ios_backgroundColor={colors.cardAlt}
       />
@@ -184,7 +299,7 @@ function RangeToggle({ value, onChange }) {
   );
 }
 
-function GraphSummaryHeader({ title, value, dateText, range, onRangeChange }) {
+function GraphSummaryHeader({ title, value, dateText, range, onRangeChange, accent }) {
   return (
     <View style={styles.graphSummaryHeader}>
       <View style={styles.graphSummaryValue}>
@@ -195,7 +310,7 @@ function GraphSummaryHeader({ title, value, dateText, range, onRangeChange }) {
       </View>
       <View style={styles.graphSummaryControls}>
         <Text style={styles.cardDate}>{dateText}</Text>
-        <RangeToggle value={range} onChange={onRangeChange} />
+        <RangeToggle value={range} onChange={onRangeChange} accent={accent} />
       </View>
     </View>
   );
@@ -217,6 +332,48 @@ function clipSeries(points, start, end) {
   return [...(before ? [before] : []), ...inside, ...(after ? [after] : [])];
 }
 
+// Day mode only needs the broad production/usage shape. Aggregate minute-level
+// samples into ten-minute averages while retaining the exact trace endpoints.
+function downsampleDaySeries(points, bucketMs = 10 * 60 * 1000) {
+  if (points.length < 3) return points;
+  const buckets = [];
+  let currentKey = null;
+  let sumTime = 0;
+  let sumValue = 0;
+  let count = 0;
+
+  const flush = () => {
+    if (!count) return;
+    buckets.push({
+      t: Math.round(sumTime / count),
+      value: sumValue / count,
+    });
+  };
+
+  for (const point of points) {
+    const key = Math.floor(point.t / bucketMs);
+    if (currentKey != null && key !== currentKey) {
+      flush();
+      sumTime = 0;
+      sumValue = 0;
+      count = 0;
+    }
+    currentKey = key;
+    sumTime += point.t;
+    sumValue += Number(point.value) || 0;
+    count += 1;
+  }
+  flush();
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  return [
+    first,
+    ...buckets.filter((point) => point.t > first.t && point.t < last.t),
+    last,
+  ];
+}
+
 function LiveEnergyChart({
   value,
   unit = "kW",
@@ -231,122 +388,114 @@ function LiveEnergyChart({
   onScrubStart,
   onScrubEnd,
 }) {
-  // Virtual scroll position (0…chartWidth) of the centered time. A native
-  // horizontal ScrollView drives the scroll (so it gets native momentum/fling
-  // and feels smooth); the chart is drawn behind it in a fixed viewport-sized
-  // SVG that follows the offset. `chartWidth` sets the hourly zoom (~1h/screen).
-  const chartWidth = range === "hour" ? viewportWidth * 24 : viewportWidth;
-  const [hourScrollX, setHourScrollX] = useState(0);
+  const timedPoints = data.filter((point) => Number.isFinite(point?.t));
+  const firstPointTime = timedPoints[0]?.t ?? windowStart;
+  const lastPointTime = timedPoints[timedPoints.length - 1]?.t ?? windowEnd;
+  const hasTraceRange =
+    timedPoints.length > 1 && lastPointTime > firstPointTime;
+  const traceStart = Math.max(windowStart, firstPointTime);
+  const traceEnd = Math.max(traceStart + 1, Math.min(windowEnd, lastPointTime));
+  const fullSpan = Math.max(1, windowEnd - windowStart);
+  // Hour mode shows roughly one hour per viewport. Day mode keeps the same
+  // centered-cursor interaction at a broader six-hour scale.
+  const visibleDuration = range === "hour"
+    ? 60 * 60 * 1000
+    : 6 * 60 * 60 * 1000;
+  const chartWidth = Math.max(
+    viewportWidth,
+    viewportWidth * (fullSpan / visibleDuration)
+  );
+  const firstCursorX =
+    ((traceStart - windowStart) / fullSpan) * chartWidth;
+  const lastCursorX =
+    ((traceEnd - windowStart) / fullSpan) * chartWidth;
+  // Native scrolling is relative to the first trace point. The graph viewport
+  // may show space around the trace, but the center cursor itself can only move
+  // from the first plotted timestamp to the last.
+  const cursorTravel = Math.max(0, lastCursorX - firstCursorX);
+  const [scrollX, setScrollX] = useState(0);
   const scrollRef = useRef(null);
 
-  // Position the hour view at "now" when it opens.
+  // Open at the latest available trace position when the selected range changes.
+  // Also run once when the first usable trace arrives after startup. Later live
+  // samples do not change `hasTraceRange`, so they cannot snap an active scroll.
   useEffect(() => {
-    if (range === "day") {
-      scrollRef.current?.scrollTo({ x: 0, animated: false });
-      setHourScrollX(0);
-      return;
-    }
-    const span = Math.max(1, windowEnd - windowStart);
-    const nowRatio = Math.max(0, Math.min(1, (Date.now() - windowStart) / span));
-    const targetX = nowRatio * chartWidth;
-    // Defer so the ScrollView has laid out its content before we scroll it.
+    if (!hasTraceRange) return undefined;
+    const targetX = cursorTravel;
     const id = setTimeout(() => {
       scrollRef.current?.scrollTo({ x: targetX, animated: false });
-      setHourScrollX(targetX);
+      setScrollX(targetX);
     }, 0);
     return () => clearTimeout(id);
-  }, [chartWidth, range, windowEnd, windowStart]);
+  }, [hasTraceRange, range, viewportWidth]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const onHourScroll = (event) => setHourScrollX(event.nativeEvent.contentOffset.x);
+  const onChartScroll = (event) => {
+    const nextX = Math.max(
+      0,
+      Math.min(cursorTravel, event.nativeEvent.contentOffset.x)
+    );
+    setScrollX(nextX);
+  };
 
-  const chart = useMemo(() => (
-    <LineChart
-      data={data}
-      height={ENERGY_CHART_HEIGHT}
-      color={color}
-      fillId={fillId}
-      timeSpan="today"
-      valueLabel={`${value}${unit}`}
-      markers={markers}
-      windowStart={windowStart}
-      windowEnd={windowEnd}
-      width={chartWidth}
-      tickMode={range === "hour" ? "hour" : "day"}
-      showCursor={range !== "hour"}
-      onScrubStart={onScrubStart}
-      onScrubEnd={onScrubEnd}
-    />
-  ), [
-    chartWidth,
-    color,
-    data,
-    fillId,
-    markers,
-    onScrubEnd,
-    onScrubStart,
-    unit,
-    value,
-    windowEnd,
-    windowStart,
-  ]);
-  // The hour graph is one viewport-sized SVG showing the slice currently under
-  // the cursor; it pans as `hourScrollX` changes. A fixed Y-scale shared with
-  // the cursor dot keeps the line height stable while scrolling.
-  const hourMax = Math.max(1, ...data.map((point) => Number(point.value) || 0)) * 1.14;
-  const hourSpan = Math.max(1, windowEnd - windowStart);
+  // Draw only the visible slice behind a stationary center cursor. Both ranges
+  // share the same scale and interaction; only their visible duration differs.
+  const chartMax = Math.max(1, ...data.map((point) => Number(point.value) || 0)) * 1.14;
+  const cursorX = firstCursorX + scrollX;
   const visibleStart =
-    windowStart + ((hourScrollX - viewportWidth / 2) / chartWidth) * hourSpan;
+    windowStart + ((cursorX - viewportWidth / 2) / chartWidth) * fullSpan;
   const visibleEnd =
-    windowStart + ((hourScrollX + viewportWidth / 2) / chartWidth) * hourSpan;
-  const hourChart = (
+    windowStart + ((cursorX + viewportWidth / 2) / chartWidth) * fullSpan;
+  const displayData =
+    range === "day" ? downsampleDaySeries(data) : data;
+  const visibleChart = (
     <LineChart
-      data={clipSeries(data, visibleStart, visibleEnd)}
+      data={clipSeries(displayData, visibleStart, visibleEnd)}
       height={ENERGY_CHART_HEIGHT}
       color={color}
-      fillId={`${fillId}Hour`}
+      labelColor="#fff"
+      fillId={`${fillId}${range === "hour" ? "Hour" : "Day"}`}
       markers={markers}
       windowStart={visibleStart}
       windowEnd={visibleEnd}
       width={viewportWidth}
-      tickMode="hour"
+      tickMode={range === "hour" ? "hour" : "day"}
       showCursor={false}
       centerCursor
-      maxValue={hourMax}
+      maxValue={chartMax}
     />
   );
 
   return (
     <View style={styles.energyChart}>
       <View style={styles.chartViewport}>
-        {range === "hour" ? (
-          <>
-            <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-              {hourChart}
-            </View>
-            <ScrollView
-              ref={scrollRef}
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              scrollEventThrottle={16}
-              decelerationRate="normal"
-              onScroll={onHourScroll}
-              onScrollBeginDrag={onScrubStart}
-              onScrollEndDrag={onScrubEnd}
-              onMomentumScrollEnd={onScrubEnd}
-              style={styles.chartScroller}
-              contentContainerStyle={{
-                width: chartWidth + viewportWidth,
-                height: ENERGY_CHART_HEIGHT,
-              }}
-            >
-              <View
-                style={{ width: chartWidth + viewportWidth, height: ENERGY_CHART_HEIGHT }}
-              />
-            </ScrollView>
-          </>
-        ) : (
-          chart
-        )}
+        <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+          {visibleChart}
+        </View>
+        <ScrollView
+          ref={scrollRef}
+          horizontal
+          bounces={false}
+          overScrollMode="never"
+          showsHorizontalScrollIndicator={false}
+          scrollEventThrottle={16}
+          decelerationRate="normal"
+          onScroll={onChartScroll}
+          onScrollBeginDrag={onScrubStart}
+          onScrollEndDrag={onScrubEnd}
+          onMomentumScrollEnd={onScrubEnd}
+          style={styles.chartScroller}
+          contentContainerStyle={{
+            width: cursorTravel + viewportWidth,
+            height: ENERGY_CHART_HEIGHT,
+          }}
+        >
+          <View
+            style={{
+              width: cursorTravel + viewportWidth,
+              height: ENERGY_CHART_HEIGHT,
+            }}
+          />
+        </ScrollView>
       </View>
     </View>
   );
@@ -376,14 +525,27 @@ export default function HomeScreen({ navigation }) {
   const daily = useDailyEnergy();
   const storedSeries = useEnergySeries();
   const background = useCurrentBackground();
+  const { names } = useDeviceNames();
+  const { order } = useDeviceOrder();
   const { width } = useWindowDimensions();
-  const chartViewportWidth = Math.max(280, width - 68);
+  // Chart cards are inset 16pt from the screen. The graph itself spans the full
+  // card width; only the summary header keeps the card's 18pt content padding.
+  const chartViewportWidth = Math.max(280, width - 32);
+  // Show four batteries per view inside the card (16pt screen padding + 18pt card
+  // padding on each side), with small gutters between the four visible items.
+  const batteryPerView = 4;
+  const batteryGap = 10;
+  const batteryItemWidth =
+    (width - 32 - 36 - batteryGap * (batteryPerView - 1)) / batteryPerView;
+  // The carousel pages a full group of four at a time.
+  const batteryPageStride = batteryPerView * (batteryItemWidth + batteryGap);
 
   // Scale the live-stat font to the device width (locked against OS font scaling).
   const statFont = Math.round(34 * Math.min(Math.max(width / 390, 0.82), 1.3));
   const statValueStyle = [styles.heroValue, { fontSize: statFont }];
   const statUnitStyle = [styles.heroUnit, { fontSize: statFont }];
   const [selectedBatteryId, setSelectedBatteryId] = useState(null);
+  const batteryScrollX = useRef(new Animated.Value(0)).current;
   const [solarRange, setSolarRange] = useState("hour");
   const [loadRange, setLoadRange] = useState("hour");
   const [graphScrubbing, setGraphScrubbing] = useState(false);
@@ -425,7 +587,11 @@ export default function HomeScreen({ navigation }) {
     loadWindowStart,
     loadWindowEnd
   );
-  const batteries = readings.filter((reading) => reading.kind === "bms");
+  // Same ordering the devices page uses, so batteries line up across screens.
+  const batteries = orderReadings(
+    order,
+    readings.filter((reading) => reading.kind === "bms")
+  );
   const batteryAmps = live.battery_a;
   const batteryWatts = live.battery_w;
 
@@ -524,47 +690,56 @@ export default function HomeScreen({ navigation }) {
                   </View>
                 </View>
               </View>
-              <View style={styles.batteryRow}>
-                {batteries.map((reading, index) => (
-                  <Pressable
-                    key={reading.device_id}
-                    style={({ pressed }) => [
-                      styles.batteryItem,
-                      pressed && styles.batteryItemPressed,
-                    ]}
-                    onPress={() => setSelectedBatteryId(reading.device_id)}
-                    accessibilityRole="button"
-                    accessibilityLabel={t("device.open", {
-                      name: reading.device_name || reading.device_id,
-                    })}
-                  >
-                    <BatteryBar
-                      voltage={batteryVoltage(reading)}
-                      current={batteryCurrent(reading)}
+              <View style={styles.batteryScrollWrap}>
+                <Animated.ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.batteryRow}
+                  contentContainerStyle={{ gap: batteryGap }}
+                  snapToInterval={batteryPageStride}
+                  decelerationRate="fast"
+                  scrollEventThrottle={16}
+                  onScroll={Animated.event(
+                    [{ nativeEvent: { contentOffset: { x: batteryScrollX } } }],
+                    { useNativeDriver: false }
+                  )}
+                >
+                  {batteries.map((reading) => (
+                    <BatteryItem
+                      key={reading.device_id}
+                      reading={reading}
+                      name={resolveDeviceName(names, reading)}
                       online={reading.online}
-                      label={`#${index + 1}`}
+                      width={batteryItemWidth}
+                      onPress={() => setSelectedBatteryId(reading.device_id)}
                     />
-                    <View style={styles.batteryVoltageReadout}>
-                      <LiveStat
-                        value={batteryVoltage(reading).toFixed(1)}
-                        unit="V"
-                        valueStyle={styles.batteryVoltValue}
-                        unitStyle={styles.batteryVoltUnit}
-                        gap={2}
-                      />
-                    </View>
-                    <View style={styles.batteryAmperageReadout}>
-                      <LiveStat
-                        value={batteryCurrent(reading).toFixed(1)}
-                        unit="A"
-                        valueStyle={styles.batteryAmpValue}
-                        unitStyle={styles.batteryAmpUnit}
-                        gap={2}
-                      />
-                    </View>
-                  </Pressable>
-                ))}
+                  ))}
+                </Animated.ScrollView>
               </View>
+              {batteries.length > batteryPerView && (
+                <BatteryDots
+                  count={Math.ceil(batteries.length / batteryPerView)}
+                  scrollX={batteryScrollX}
+                  stride={batteryPageStride}
+                />
+              )}
+              {/* Blur the left/right edges over the full card height, so items
+                  fade out as they scroll past the card's sides. */}
+              <MaskedView
+                pointerEvents="none"
+                style={styles.batteryEdgeFade}
+                maskElement={
+                  <LinearGradient
+                    colors={["#000", "transparent", "transparent", "#000"]}
+                    locations={[0, 0.1, 0.9, 1]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 0 }}
+                    style={StyleSheet.absoluteFill}
+                  />
+                }
+              >
+                <BlurView intensity={28} tint="default" style={StyleSheet.absoluteFill} />
+              </MaskedView>
             </GlassCard>
           )}
 
@@ -576,16 +751,17 @@ export default function HomeScreen({ navigation }) {
             border="rgba(255,255,255,0.45)"
           >
             <GraphSummaryHeader
-              title={t("energy.solar")}
+              title={t("home.solarProduction")}
               value={daily.solar_kwh}
               dateText={todayDate}
               range={solarRange}
               onRangeChange={setSolarRange}
+              accent={SOLAR_GREEN}
             />
             <LiveEnergyChart
               value={kw(production)}
               data={solarChartData}
-              color={colors.yellow}
+              color={SOLAR_GREEN}
               fillId="solarTodayFill"
               markers={sunMarkers}
               windowStart={solarWindowStart}
@@ -610,11 +786,12 @@ export default function HomeScreen({ navigation }) {
               dateText={todayDate}
               range={loadRange}
               onRangeChange={setLoadRange}
+              accent={LOAD_RED}
             />
             <LiveEnergyChart
               value={kw(load)}
               data={loadChartData}
-              color="#FFD4BE"
+              color={LOAD_RED}
               fillId="loadTodayFill"
               markers={sunMarkers}
               windowStart={loadWindowStart}
@@ -731,72 +908,117 @@ const styles = StyleSheet.create({
   batteryLight: { color: colors.white, ...shadow },
   batteryStats: { flexDirection: "row", alignItems: "center", paddingTop: 2 },
   batteryStatColumn: { flex: 1, alignItems: "center" },
-  batteryRow: { flexDirection: "row", paddingTop: 20 },
-  batteryItem: { flex: 1, alignItems: "center", paddingHorizontal: 4 },
+  batteryScrollWrap: { marginHorizontal: -18, marginTop: 22 },
+  batteryRow: { paddingHorizontal: 18 },
+  // Spans the whole card: negative insets cancel the card's 18pt padding so the
+  // blurred edges reach the card sides (clipped to its rounded corners).
+  batteryEdgeFade: { position: "absolute", top: -18, bottom: -18, left: -18, right: -18 },
+  batteryItem: { alignItems: "center" },
   batteryItemPressed: { opacity: 0.6 },
-  batteryUnit: { alignItems: "center" },
+  batteryCell: { alignItems: "center" },
+  batteryCellOffline: { opacity: 0.55 },
   batteryCap: {
-    width: BATTERY_CAP_W,
-    height: BATTERY_CAP_H,
-    borderTopLeftRadius: 3,
-    borderTopRightRadius: 3,
+    width: 16,
+    height: 4,
+    borderTopLeftRadius: 2,
+    borderTopRightRadius: 2,
     borderCurve: "continuous",
     backgroundColor: "rgba(255,255,255,0.55)",
     marginBottom: -1,
+    zIndex: 1,
   },
-  batteryBody: {
-    width: BATTERY_W,
-    height: BATTERY_H,
+  // The body is a single clear GlassView; the green liquid sits directly under it,
+  // so no opaque background here — just the clip bounds and the rim.
+  batteryShape: {
+    width: 52,
+    height: 90,
     borderRadius: 9,
     borderCurve: "continuous",
-    borderWidth: 2,
-    borderColor: "rgba(255,255,255,0.55)",
+    overflow: "hidden",
+  },
+  // Inset modestly from the cell walls so the green is large but not touching the
+  // glass edges; clips the waves to the rounded pill. Its radius is the shape's
+  // radius minus the inset, so the inner pill stays concentric with the glass body.
+  batteryFluidTrack: {
+    position: "absolute",
+    top: 7,
+    left: 7,
+    right: 7,
+    bottom: 7,
+    borderRadius: 2,
+    borderCurve: "continuous",
     overflow: "hidden",
     justifyContent: "flex-end",
-    backgroundColor: "rgba(255,255,255,0.12)",
   },
-  batteryFill: { width: "100%" },
-  batteryIndexLabel: {
+  // The fill height marks the surface; waves are allowed to rise just above it so
+  // the top edge ripples like liquid (the track clips them to the pill).
+  batteryFluid: { width: "100%" },
+  // Rounded square anchored just above the surface; counter-rotating two of them
+  // makes the curved top edge crest and dip like a wavy liquid surface.
+  batteryWave: {
     position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 7,
+    left: "-35%",
+    width: "170%",
+    aspectRatio: 1,
+    top: -5,
+    borderRadius: 26,
+    borderCurve: "continuous",
+  },
+  batteryWaveTop: { top: -11 },
+  // Match the shape's radius so the glass renders its own rounded corners (its
+  // refraction follows the curve) rather than being clipped at square corners.
+  batteryGlass: { borderRadius: 9, borderCurve: "continuous" },
+  batteryGlassFallback: { backgroundColor: "rgba(255,255,255,0.14)" },
+  batteryDotsRow: {
+    flexDirection: "row",
+    alignSelf: "center",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 12,
+  },
+  batteryDot: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.white,
+  },
+  batteryName: {
+    marginTop: 7,
+    maxWidth: "100%",
     color: colors.white,
-    fontSize: 15,
-    fontWeight: "900",
+    fontSize: 11,
+    fontWeight: "700",
     textAlign: "center",
     ...shadow,
   },
-  particleLayer: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    bottom: 0,
-    overflow: "hidden",
+  batteryReadouts: {
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 1,
+    marginTop: 3,
   },
-  batteryVoltageReadout: { marginTop: 8, alignItems: "center" },
-  batteryAmperageReadout: { marginTop: 7, alignItems: "center" },
+  batteryReadout: { flexDirection: "row", alignItems: "center", gap: 3 },
   batteryVoltValue: {
     color: colors.white,
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: "700",
     ...shadow,
   },
   batteryVoltUnit: {
     color: "rgba(255,255,255,0.82)",
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: "500",
     ...shadow,
   },
   batteryAmpValue: {
     color: "rgba(255,255,255,0.86)",
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "700",
     ...shadow,
   },
   batteryAmpUnit: {
     color: "rgba(255,255,255,0.72)",
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "500",
     ...shadow,
   },
@@ -809,7 +1031,11 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   graphSummaryValue: { flex: 1 },
-  graphSummaryControls: { alignItems: "flex-end", gap: 8 },
+  graphSummaryControls: {
+    alignItems: "flex-end",
+    alignSelf: "flex-end",
+    gap: 8,
+  },
   rangeSwitchRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -818,10 +1044,16 @@ const styles = StyleSheet.create({
   },
   rangeSwitchText: { color: "rgba(255,255,255,0.86)", fontSize: 12, fontWeight: "800", ...shadow },
   cardDate: { color: "rgba(255,255,255,0.86)", fontSize: 16, fontWeight: "700", ...shadow },
-  graphSummaryTitle: { color: colors.white, fontSize: 17, fontWeight: "800", marginBottom: 2, ...shadow },
+  graphSummaryTitle: {
+    color: colors.white,
+    fontSize: 30,
+    fontWeight: "200",
+    marginBottom: 2,
+    ...shadow,
+  },
   dailyValue: { color: colors.white, fontSize: 30, fontWeight: "800", letterSpacing: -0.8, ...shadow },
   dailyUnit: { color: "rgba(255,255,255,0.78)", fontSize: 15, fontWeight: "700", ...shadow },
-  energyChart: { marginTop: 6 },
+  energyChart: { marginTop: 6, marginHorizontal: -18 },
   chartViewport: {
     height: ENERGY_CHART_HEIGHT,
     overflow: "hidden",
