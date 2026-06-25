@@ -72,14 +72,38 @@ def _cells_close(a: List[int], b: List[int], tol_mv: int = 8) -> bool:
     return len(a) == len(b) and all(abs(x - y) <= tol_mv for x, y in zip(a, b))
 
 
+def _same_pack(ac: List[int], af: Dict[str, float],
+               bc: List[int], bf: Dict[str, float]) -> bool:
+    """True if two cell-info frames came from the *same* physical pack.
+
+    Cell voltages alone are NOT enough: in a balanced bank (e.g. right after you add a
+    fresh pack to the daisy chain) two *different* packs can have every cell within a few mV
+    of each other, so matching on cells would wrongly fuse them into one — the new battery
+    then never shows up, or flickers in and out as capture timing changes. So we also require
+    the pack's *stable identity* fields to agree: the lifetime charge-cycle count and the
+    nominal (rated) capacity. These are fixed per pack and don't change within a poll window,
+    yet they almost always differ between packs (different age/use, sometimes different model),
+    so they tell balanced-but-distinct packs apart while still matching a single pack's own
+    frames across broadcast cycles.
+    """
+    if not _cells_close(ac, bc):
+        return False
+    if int(af.get("cycles", -1)) != int(bf.get("cycles", -2)):
+        return False
+    if abs(af.get("nominal_capacity", 0.0) - bf.get("nominal_capacity", 0.0)) > 0.5:
+        return False
+    return True
+
+
 def cycle_complete(buf: bytes) -> bool:
     """True once the first pack's cell-info frame recurs — i.e. a full broadcast cycle has
     been captured, so every pack has been seen and we can stop reading early."""
     frames = list(iter_cell_frames(buf))
     if len(frames) < 2:
         return False
-    base = frames[0][0]
-    return any(_cells_close(frames[i][0], base) for i in range(1, len(frames)))
+    base_c, base_f = frames[0]
+    return any(_same_pack(frames[i][0], frames[i][1], base_c, base_f)
+               for i in range(1, len(frames)))
 
 
 def distinct_packs(buf: bytes) -> List[Tuple[List[int], Dict[str, float]]]:
@@ -87,20 +111,26 @@ def distinct_packs(buf: bytes) -> List[Tuple[List[int], Dict[str, float]]]:
 
     Packs broadcast in a fixed repeating order; we read >1 cycle and detect the period by
     finding when the first pack's frame recurs, which yields the full set regardless of where
-    in the cycle the capture started.
+    in the cycle the capture started. "Recurs" is decided by :func:`_same_pack` (cells *and*
+    stable identity fields), so balanced packs are kept separate instead of being merged.
     """
     frames = list(iter_cell_frames(buf))
     if not frames:
         raise ProtocolError("no JK02 cell-info frames in stream")
-    base = frames[0][0]
+    base_c, base_f = frames[0]
     packs = frames
     for period in range(1, len(frames)):
-        if _cells_close(frames[period][0], base):
+        if _same_pack(frames[period][0], frames[period][1], base_c, base_f):
             packs = frames[:period]
             break
     # Deterministic order so a pack keeps the same card across polls regardless of where in
-    # the broadcast the capture started (more cells first, then highest total voltage).
-    return sorted(packs, key=lambda p: (-len(p[0]), -sum(p[0])))
+    # the broadcast the capture started. Order by cell count, then the stable identity fields
+    # (cycles, capacity) so balanced packs still get a consistent, non-jittering order, with
+    # total voltage as a final tie-break.
+    return sorted(packs, key=lambda p: (
+        -len(p[0]), -int(p[1].get("cycles", 0)),
+        -p[1].get("nominal_capacity", 0.0), -sum(p[0]),
+    ))
 
 
 def _decode_frame(frame: bytes) -> Tuple[List[int], Dict[str, float]]:

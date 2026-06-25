@@ -60,29 +60,11 @@ function batteryFill(v) {
   return Math.max(0, Math.min(1, (v - min) / (max - min)));
 }
 
-// Liquid colors by charge level (from voltage): red when low, amber mid, green full.
-// Softer / desaturated tones, kept semi-transparent so they read calm, not harsh.
-// The waves use the SAME hue as the main liquid at a low opacity, so they only add
-// gentle motion and never form a visible separation line against the body.
-function fluidColors(fill) {
-  if (fill < 0.2)
-    return {
-      gradient: ["rgba(216,150,150,0.34)", "rgba(196,108,108,0.42)"],
-      wave: "rgba(196,108,108,0.24)",
-      waveTop: "rgba(216,150,150,0.15)",
-    };
-  if (fill < 0.45)
-    return {
-      gradient: ["rgba(222,172,134,0.34)", "rgba(206,146,104,0.42)"],
-      wave: "rgba(206,146,104,0.24)",
-      waveTop: "rgba(222,172,134,0.15)",
-    };
-  if (fill < 0.75)
-    return {
-      gradient: ["rgba(220,202,140,0.34)", "rgba(202,180,108,0.42)"],
-      wave: "rgba(202,180,108,0.24)",
-      waveTop: "rgba(220,202,140,0.15)",
-    };
+// Liquid color: always green, regardless of charge level. Softer / desaturated
+// tones, kept semi-transparent so they read calm, not harsh. The waves use the
+// SAME hue as the main liquid at a low opacity, so they only add gentle motion
+// and never form a visible separation line against the body.
+function fluidColors() {
   return {
     gradient: ["rgba(91,229,132,0.4)", "rgba(52,199,89,0.48)"],
     wave: "rgba(52,199,89,0.28)",
@@ -138,9 +120,9 @@ function BatteryFluid({ fill, online }) {
     inputRange: [0, 1],
     outputRange: [`${rng.phaseB}deg`, `${rng.phaseB - 360}deg`],
   });
-  // Color the liquid by charge level when online; muted white when offline.
+  // Liquid is always green when online; muted white when offline.
   const palette = online
-    ? fluidColors(fill)
+    ? fluidColors()
     : {
         gradient: ["rgb(200,202,205)", "rgb(176,178,182)"],
         wave: "rgba(176,178,182,0.36)",

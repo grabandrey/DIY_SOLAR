@@ -4,15 +4,20 @@ The BMS streams 300-byte frames at 115200. A poll reads a window of the stream a
 every pack's cell-info (0x02) frame, so multiple packs daisy-chained on one RS485 bus are
 fetched automatically — no per-pack config.
 
-Packs are kept across polls *by position in the broadcast cycle* (not by cell similarity —
-a balanced bank can have near-identical packs, which similarity matching would wrongly merge
-into one). A pack that's briefly missing from a capture window is carried forward with its
+Packs are kept across polls *by position in the broadcast cycle*. Distinct packs are told
+apart by both their cell voltages and their stable identity fields (cycle count, rated
+capacity) — see ``jk_bms._same_pack`` — so a balanced bank with near-identical cell voltages
+(typical right after you add a fresh pack to the daisy chain) no longer collapses two packs
+into one. A pack that's briefly missing from a capture window is carried forward with its
 last-known reading rather than dropped, so the set of batteries the API exposes is stable and
 the frontend shows all of them immediately on connect instead of having them appear one by
 one as windows happen to capture them.
 
-``options``: ``units`` forces the expected pack count; ``window_seconds`` tunes how long the
-stream is read per poll (must cover more than one broadcast cycle to see every pack).
+Pack count auto-detects: every pack physically on the bus is shown, so plugging another JK
+battery into the parallel/daisy-chain ports makes it appear on its own with no config change.
+``options``: ``units`` is an optional hard cap on how many packs to show (leave unset to show
+all that are present); ``window_seconds`` tunes how long the stream is read per poll (must
+cover more than one broadcast cycle to see every pack).
 """
 
 from __future__ import annotations
@@ -29,8 +34,11 @@ log = logging.getLogger(__name__)
 # The JK streams at its own (slow) pace, so we read for a fixed DURATION and take whatever
 # arrived rather than a fixed byte count (which would time out). The window must span more
 # than one full broadcast cycle to capture every pack at least once.
-DEFAULT_WINDOW_SECONDS = 4.0
-MAX_WINDOW_BYTES = 16000
+# Wide enough that a long daisy chain's full broadcast cycle fits even when each pack
+# broadcasts slowly; `until=jk.cycle_complete` stops the read early once every pack has been
+# seen once, so a normal poll returns well before this and only a slow/incomplete bus waits.
+DEFAULT_WINDOW_SECONDS = 8.0
+MAX_WINDOW_BYTES = 32000
 
 # A pack slot absent from a poll is still reported online for this many consecutive polls
 # (short windows routinely skip a pack); after that it's reported offline, and after
