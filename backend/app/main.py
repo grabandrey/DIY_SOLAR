@@ -182,6 +182,13 @@ async def energy_series(date: str | None = None) -> dict:
     return _energy().series(date)
 
 
+@app.get("/api/energy/history")
+async def energy_history(days: int = 90) -> dict:
+    """Daily totals over a trailing window, for the analytics page's daily and
+    monthly views (the monthly roll-up is grouped client-side from these days)."""
+    return _energy().history(days)
+
+
 @app.websocket("/ws/bridge")
 async def ws_bridge(websocket: WebSocket) -> None:
     """A home USB bridge dials in here and stays connected. The backend then drives its

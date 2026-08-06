@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from ..devices.base import Reading
 from .energy_db import EnergyDB, PostgresBackend, SqliteBackend
-from .metrics import load_power, metric_value, solar_power
+from .metrics import grid_power, load_power, metric_value, solar_power
 
 
 def build_energy_store(settings) -> "EnergyStore":
@@ -70,6 +70,7 @@ class EnergyStore:
             (row["day"], row["device_id"]): {
                 "solar_wh": row["solar_wh"],
                 "consumption_wh": row["consumption_wh"],
+                "grid_wh": row["grid_wh"],
                 "hardware_solar_wh": row["hardware_solar_wh"],
                 "updated_at": row["updated_at"],
             }
@@ -81,6 +82,7 @@ class EnergyStore:
                 "sample_ts": row["sample_ts"],
                 "solar_power_w": row["solar_power_w"],
                 "load_power_w": row["load_power_w"],
+                "grid_power_w": row["grid_power_w"],
             }
             for row in states
         }
@@ -95,6 +97,7 @@ class EnergyStore:
         sample_ts = timestamp.timestamp()
         solar_w = solar_power(reading)
         load_w = load_power(reading)
+        grid_w = grid_power(reading)
         hardware_solar_wh = metric_value(reading, "pv_energy_today") * 1000
         key = (day, reading.device_id)
         minute_ts = int(sample_ts // 60) * 60
@@ -111,6 +114,7 @@ class EnergyStore:
                 {
                     "solar_wh": 0.0,
                     "consumption_wh": 0.0,
+                    "grid_wh": 0.0,
                     "hardware_solar_wh": 0.0,
                     "updated_at": sample_ts,
                 },
@@ -125,6 +129,12 @@ class EnergyStore:
                     aggregate["consumption_wh"] += (
                         (float(previous["load_power_w"]) + load_w) / 2
                     ) * elapsed / 3600
+                    # Grid import only: negative grid power is export, which is not
+                    # consumption and would otherwise cancel out real imports.
+                    aggregate["grid_wh"] += (
+                        max(float(previous.get("grid_power_w", 0.0)), 0.0)
+                        + max(grid_w, 0.0)
+                    ) / 2 * elapsed / 3600
 
             aggregate["hardware_solar_wh"] = max(
                 aggregate["hardware_solar_wh"], hardware_solar_wh
@@ -135,6 +145,7 @@ class EnergyStore:
                 "sample_ts": sample_ts,
                 "solar_power_w": solar_w,
                 "load_power_w": load_w,
+                "grid_power_w": grid_w,
             }
             sample_key = (reading.device_id, minute_ts)
             self._samples[sample_key] = {
@@ -161,6 +172,7 @@ class EnergyStore:
                     "device_id": row["device_id"],
                     "solar_kwh": round(row["solar_wh"] / 1000, 3),
                     "consumption_kwh": round(row["consumption_wh"] / 1000, 3),
+                    "grid_kwh": round(row["grid_wh"] / 1000, 3),
                 }
                 for row in rows
             ]
@@ -171,7 +183,62 @@ class EnergyStore:
             "consumption_kwh": round(
                 sum(item["consumption_kwh"] for item in devices), 3
             ),
+            "grid_kwh": round(sum(item["grid_kwh"] for item in devices), 3),
             "devices": devices,
+        }
+
+    def history(self, days: int = 90) -> Dict[str, Any]:
+        """Daily totals for the last ``days`` local days, oldest first.
+
+        Persisted rows come from the database; today's figures (and anything else not
+        flushed yet) are layered on top from memory, so the newest day is not stale by
+        up to one flush interval. Days with no data are omitted rather than zero-filled
+        — a gap in the history is not the same as a day that produced nothing.
+        """
+        span = max(1, min(int(days), self.retention_days))
+        today = datetime.now(self.timezone).date()
+        start_day = (today - timedelta(days=span - 1)).isoformat()
+        end_day = today.isoformat()
+
+        with self._lock:
+            rows = self.db.fetch_history(start_day, end_day)
+            totals: Dict[str, Dict[str, float]] = {
+                row["day"]: {
+                    "solar_wh": float(row["solar_wh"] or 0.0),
+                    "consumption_wh": float(row["consumption_wh"] or 0.0),
+                    "grid_wh": float(row["grid_wh"] or 0.0),
+                }
+                for row in rows
+            }
+            # Unflushed in-memory aggregates supersede whatever is on disk for that day.
+            pending: Dict[str, Dict[str, float]] = {}
+            for (day, _device_id) in self._dirty_daily:
+                if not (start_day <= day <= end_day):
+                    continue
+                pending.setdefault(
+                    day, {"solar_wh": 0.0, "consumption_wh": 0.0, "grid_wh": 0.0}
+                )
+            for (day, device_id), aggregate in self._daily.items():
+                if day not in pending:
+                    continue
+                bucket = pending[day]
+                bucket["solar_wh"] += float(aggregate["solar_wh"])
+                bucket["consumption_wh"] += float(aggregate["consumption_wh"])
+                bucket["grid_wh"] += float(aggregate.get("grid_wh", 0.0))
+            totals.update(pending)
+
+        return {
+            "start": start_day,
+            "end": end_day,
+            "days": [
+                {
+                    "date": day,
+                    "solar_kwh": round(values["solar_wh"] / 1000, 3),
+                    "consumption_kwh": round(values["consumption_wh"] / 1000, 3),
+                    "grid_kwh": round(values["grid_wh"] / 1000, 3),
+                }
+                for day, values in sorted(totals.items())
+            ],
         }
 
     def series(self, day: str | None = None) -> Dict[str, Any]:
@@ -227,6 +294,7 @@ class EnergyStore:
                     device_id,
                     self._daily[(day, device_id)]["solar_wh"],
                     self._daily[(day, device_id)]["consumption_wh"],
+                    self._daily[(day, device_id)]["grid_wh"],
                     self._daily[(day, device_id)]["hardware_solar_wh"],
                     self._daily[(day, device_id)]["updated_at"],
                 )
@@ -239,6 +307,7 @@ class EnergyStore:
                     self._state[device_id]["sample_ts"],
                     self._state[device_id]["solar_power_w"],
                     self._state[device_id]["load_power_w"],
+                    self._state[device_id].get("grid_power_w", 0.0),
                 )
                 for device_id in self._dirty_state
             ]

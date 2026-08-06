@@ -108,6 +108,9 @@ def test_build_energy_store_passes_component_conninfo(monkeypatch, tmp_path):
         def fetch_summary(self, day):
             return []
 
+        def fetch_history(self, start_day, end_day):
+            return []
+
         def fetch_series(self, day):
             return []
 

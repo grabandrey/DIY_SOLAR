@@ -1,9 +1,10 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
   View,
   Text,
   Animated,
   Easing,
+  Image,
   ScrollView,
   StyleSheet,
   Pressable,
@@ -17,25 +18,50 @@ import MaskedView from "@react-native-masked-view/masked-view";
 import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useFocusEffect } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
-import { colors } from "../theme";
-import { sunTimesForDate, useCurrentBackground } from "../background";
+import { colors, radius as radii } from "../theme";
+import Svg, { Path } from "react-native-svg";
+import {
+  panelAnchorOnScreen,
+  sunTimesForDate,
+  useCurrentBackground,
+} from "../background";
 import {
   useDailyEnergy,
+  useDiscovery,
   useEnergySeries,
   useLive,
   useReadings,
 } from "../api";
 import { useProfile } from "../profile";
-import { batteryVoltage, batteryCurrent, kw } from "../metrics";
+import { batteryVoltage, chargePower, usedPower, kw } from "../metrics";
 import { useDeviceNames, resolveDeviceName } from "../deviceNames";
+import { useDeviceIcons, resolveDeviceIcon } from "../deviceIcons";
+import { deviceImageSource } from "../deviceImages";
 import { useDeviceOrder, orderReadings } from "../deviceOrder";
+import DeviceTypeIcon from "../components/DeviceTypeIcon";
+import StatIcon from "../components/StatIcon";
 import GlassCard from "../components/GlassCard";
 import LiveStat from "../components/LiveStat";
 import BatteryInfoSheet from "../components/BatteryInfoSheet";
 import LineChart from "../components/LineChart";
 
 const glass = isLiquidGlassAvailable();
+
+// The pinned cards fade out over this much scrolling.
+const PINNED_FADE_DISTANCE = 130;
+// The tab bar floats at `bottom: 28` and stands ITEM + PAD_Y * 2 = 72 tall, so it
+// owns the last 100pt of the screen; leave a little air above it on top of that.
+const TAB_BAR_RESERVE = 116;
+// Dot pitch of the pointer line. One full cycle of travel equals one gap, so the
+// dots appear to march continuously toward the roof rather than restarting.
+const DOT_PITCH = 15;
+const DOT_WIDTH = 5;
+// Gutter between the load and battery cards. Shared by the width maths and the row
+// style so the pair always adds up to exactly the screen width.
+const CARD_ROW_GAP = 24;
+const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 // Sage green for the solar production graph (trace + fill) and its toggle, and a
 // subtle red for the load graph and its toggle — both softened a touch.
@@ -162,78 +188,43 @@ function BatteryFluid({ fill, online }) {
   );
 }
 
-// A single battery in the home-screen carousel: a clear-glass cell sitting over a
-// green fluid whose level tracks the battery voltage. Tapping opens the info sheet.
-function BatteryItem({ reading, name, online, onPress, width }) {
-  const fill = batteryFill(batteryVoltage(reading));
+// The battery graphic itself: a clear-glass cell sitting over a green fluid whose
+// level tracks `fill` (0..1).
+function BatteryCell({ fill, online, width, capWidth }) {
   return (
-    <Pressable
-      style={({ pressed }) => [
-        styles.batteryItem,
-        { width },
-        pressed && styles.batteryItemPressed,
-      ]}
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityLabel={name}
-    >
-      <View style={[styles.batteryCell, !online && styles.batteryCellOffline]}>
-        <View style={styles.batteryCap} />
-        <View style={styles.batteryShape}>
-          {/* Green animated fluid, sitting under the glass. */}
-          <BatteryFluid fill={fill} online={online} />
-          {/* Clear glass body, rendered last so it stays on top of the fluid. The
-              glass carries its own corner radius so its refraction follows the
-              rounded corners instead of being clipped at square ones. */}
-          {glass ? (
-            <GlassView
-              glassEffectStyle="clear"
-              style={[StyleSheet.absoluteFill, styles.batteryGlass]}
-              pointerEvents="none"
-            />
-          ) : (
-            <View
-              style={[StyleSheet.absoluteFill, styles.batteryGlass, styles.batteryGlassFallback]}
-              pointerEvents="none"
-            />
-          )}
-        </View>
-      </View>
-      <Text style={styles.batteryName} numberOfLines={1}>
-        {name}
-      </Text>
-      <View style={styles.batteryReadouts}>
-        <View style={styles.batteryReadout}>
-          <LiveStat
-            value={batteryVoltage(reading).toFixed(1)}
-            unit="V"
-            valueStyle={styles.batteryVoltValue}
-            unitStyle={styles.batteryVoltUnit}
-            gap={2}
+    <View style={[styles.batteryCell, !online && styles.batteryCellOffline]}>
+      <View style={[styles.batteryCap, { width: capWidth }]} />
+      <View style={[styles.batteryShape, { width }]}>
+        {/* Green animated fluid, sitting under the glass. */}
+        <BatteryFluid fill={fill} online={online} />
+        {/* Clear glass body, rendered last so it stays on top of the fluid. The
+            glass carries its own corner radius so its refraction follows the
+            rounded corners instead of being clipped at square ones. */}
+        {glass ? (
+          <GlassView
+            glassEffectStyle="clear"
+            style={[StyleSheet.absoluteFill, styles.batteryGlass]}
+            pointerEvents="none"
           />
-        </View>
-        <View style={styles.batteryReadout}>
-          <LiveStat
-            value={batteryCurrent(reading).toFixed(1)}
-            unit="A"
-            valueStyle={styles.batteryAmpValue}
-            unitStyle={styles.batteryAmpUnit}
-            gap={2}
+        ) : (
+          <View
+            style={[StyleSheet.absoluteFill, styles.batteryGlass, styles.batteryGlassFallback]}
+            pointerEvents="none"
           />
-        </View>
+        )}
       </View>
-    </Pressable>
+    </View>
   );
 }
 
-// Page indicator for the battery carousel: the dot for the leftmost-visible item
-// grows into a pill and slides as you scroll. `stride` is one item + gutter.
-function BatteryDots({ count, scrollX, stride }) {
+// Page indicator for a snapping carousel: the dot for the current item grows into a
+// pill and slides as you scroll. `stride` is one item plus its gutter.
+function CarouselDots({ count, scrollX, stride }) {
   return (
-    <View style={styles.batteryDotsRow}>
+    <View style={styles.dotsRow}>
       {Array.from({ length: count }).map((_, i) => {
         const inputRange = [(i - 1) * stride, i * stride, (i + 1) * stride];
-        const width = scrollX.interpolate({
+        const dotWidth = scrollX.interpolate({
           inputRange,
           outputRange: [6, 18, 6],
           extrapolate: "clamp",
@@ -243,7 +234,7 @@ function BatteryDots({ count, scrollX, stride }) {
           outputRange: [0.3, 1, 0.3],
           extrapolate: "clamp",
         });
-        return <Animated.View key={i} style={[styles.batteryDot, { width, opacity }]} />;
+        return <Animated.View key={i} style={[styles.dot, { width: dotWidth, opacity }]} />;
       })}
     </View>
   );
@@ -508,26 +499,66 @@ export default function HomeScreen({ navigation }) {
   const storedSeries = useEnergySeries();
   const background = useCurrentBackground();
   const { names } = useDeviceNames();
+  const { icons } = useDeviceIcons();
+  const { devices } = useDiscovery();
   const { order } = useDeviceOrder();
-  const { width } = useWindowDimensions();
+  // Identical resolution to the devices page, so an inverter shows the same photo
+  // in both places: the locally-picked icon first (daisy-chained units fall back to
+  // their master), then the backend-configured image as a last resort.
+  const imageOf = (id) => {
+    const masterId = String(id).split(":")[0];
+    const backend = devices.find((d) => d.id === masterId)?.image;
+    return resolveDeviceIcon(icons, id, backend);
+  };
+  const { width, height } = useWindowDimensions();
   // Chart cards are inset 16pt from the screen. The graph itself spans the full
   // card width; only the summary header keeps the card's 18pt content padding.
   const chartViewportWidth = Math.max(280, width - 32);
-  // Show four batteries per view inside the card (16pt screen padding + 18pt card
-  // padding on each side), with small gutters between the four visible items.
-  const batteryPerView = 4;
-  const batteryGap = 10;
-  const batteryItemWidth =
-    (width - 32 - 36 - batteryGap * (batteryPerView - 1)) / batteryPerView;
-  // The carousel pages a full group of four at a time.
-  const batteryPageStride = batteryPerView * (batteryItemWidth + batteryGap);
+  // Load and battery cards share one full-bleed row: the load card runs off the left
+  // screen edge, the battery card off the right, so between them they span the whole
+  // width with a single gutter in the middle. The load card takes the larger share.
+  const hasBatteries = readings.some((reading) => reading.kind === "bms");
+  const loadCardWidth = hasBatteries
+    ? Math.round((width - CARD_ROW_GAP) * 0.62)
+    : width;
+  const batteryCardWidth = hasBatteries ? width - CARD_ROW_GAP - loadCardWidth : 0;
+  // The 20pt cap is the size these actually want; the divisor is the guard that keeps
+  // a five-character watts figure ("-1234") plus its unit inside a narrow card, since
+  // LiveStat lays that out at roughly 4.05em wide plus its 2pt gap.
+  const batteryReadoutFont = hasBatteries
+    ? Math.max(13, Math.min(20, Math.floor((batteryCardWidth - 36 - 2) / 4.05)))
+    : 20;
+  // The inverter carousel measures against its own card, so its inner width is the
+  // load card less that card's 18pt padding on each side. A fractional per-view
+  // leaves the next tile part-visible, which reads as "this scrolls".
+  // One inverter per view; the dots below the strip say how many there are.
+  const inverterGap = 12;
+  const inverterItemWidth = loadCardWidth - 36;
+  const inverterStride = inverterItemWidth + inverterGap;
 
   // Scale the live-stat font to the device width (locked against OS font scaling).
   const statFont = Math.round(34 * Math.min(Math.max(width / 390, 0.82), 1.3));
   const statValueStyle = [styles.heroValue, { fontSize: statFont }];
   const statUnitStyle = [styles.heroUnit, { fontSize: statFont }];
+  // The load card's total sits below the pinned solar reading in the hierarchy, and
+  // its card is the narrower half of the row, so it runs smaller than the hero figure.
+  const loadStatFont = Math.round(26 * Math.min(Math.max(width / 390, 0.82), 1.3));
+  const loadStatValueStyle = [styles.heroValue, { fontSize: loadStatFont }];
+  const loadStatUnitStyle = [styles.heroUnit, { fontSize: loadStatFont }];
   const [selectedBatteryId, setSelectedBatteryId] = useState(null);
-  const batteryScrollX = useRef(new Animated.Value(0)).current;
+  // Once the pinned cards have faded they must stop swallowing taps, so the layer's
+  // pointerEvents follows the same threshold the fade does.
+  const [pinnedHidden, setPinnedHidden] = useState(false);
+  // Bumped on every focus to remount the glass layers — see `useFocusEffect` below.
+  const [focusTick, setFocusTick] = useState(0);
+  const scrollRef = useRef(null);
+  const inverterScrollX = useRef(new Animated.Value(0)).current;
+  // Bottom-centre of the solar card in screen space — the pointer line starts here.
+  const [solarCardRect, setSolarCardRect] = useState(null);
+  const solarCardRef = useRef(null);
+  const scrollY = useRef(new Animated.Value(0)).current;
+  const dotPhase = useRef(new Animated.Value(0)).current;
+  const pulse = useRef(new Animated.Value(0)).current;
   const [solarRange, setSolarRange] = useState("hour");
   const [loadRange, setLoadRange] = useState("hour");
   const [graphScrubbing, setGraphScrubbing] = useState(false);
@@ -574,12 +605,198 @@ export default function HomeScreen({ navigation }) {
     order,
     readings.filter((reading) => reading.kind === "bms")
   );
+  // Everything that isn't a battery is an inverter — same split the devices page uses.
+  const inverters = orderReadings(
+    order,
+    readings.filter((reading) => reading.kind !== "bms")
+  );
   const batteryAmps = live.battery_a;
   const batteryWatts = live.battery_w;
+  // One cell now stands for the bank, so its level and readout are the average across
+  // the packs — online ones only, matching how the backend totals power and current.
+  // If every pack is offline, average them all rather than showing nothing.
+  const anyBatteryOnline = batteries.some((reading) => reading.online);
+  const averagedBatteries = anyBatteryOnline
+    ? batteries.filter((reading) => reading.online)
+    : batteries;
+  const averageBatteryVoltage = averagedBatteries.length
+    ? averagedBatteries.reduce((sum, reading) => sum + batteryVoltage(reading), 0) /
+      averagedBatteries.length
+    : 0;
+  // The cell only opens a detail sheet when there is exactly one pack behind it.
+  const onlyBattery = batteries.length === 1 ? batteries[0] : null;
+  // 92pt is the width the cell wants; on a narrow phone it takes whatever the card's
+  // inner width allows instead, so it never overruns and gets clipped.
+  const batteryCellWidth = hasBatteries
+    ? Math.max(52, Math.min(92, batteryCardWidth - 36))
+    : 92;
+  const batteryReadoutValueStyle = [
+    styles.batteryReadoutValue,
+    { fontSize: batteryReadoutFont },
+  ];
+  const batteryReadoutUnitStyle = [
+    styles.batteryReadoutUnit,
+    { fontSize: batteryReadoutFont },
+  ];
 
   // Track the opened battery by id so the sheet keeps showing live readings.
   const selectedBattery =
     batteries.find((reading) => reading.device_id === selectedBatteryId) || null;
+
+  // Coming back to this tab can leave the Liquid Glass surfaces unpainted: the views
+  // are still mounted, so nothing invalidates them and they composite as empty. Two
+  // things shake them loose — remounting them (the key bump), and a scroll nudge that
+  // forces a fresh layout/composite pass. The nudge is 1pt and immediately undone, so
+  // it is invisible and does not disturb the pinned cards' fade.
+  useFocusEffect(
+    useCallback(() => {
+      setFocusTick((tick) => tick + 1);
+      let inner = null;
+      const outer = requestAnimationFrame(() => {
+        const node = scrollRef.current;
+        if (!node || typeof node.scrollTo !== "function") return;
+        node.scrollTo({ y: 1, animated: false });
+        inner = requestAnimationFrame(() => {
+          node.scrollTo({ y: 0, animated: false });
+        });
+      });
+      return () => {
+        cancelAnimationFrame(outer);
+        if (inner !== null) cancelAnimationFrame(inner);
+      };
+    }, [])
+  );
+
+  // The greeting and the pointer line fade; the cards leave sideways instead.
+  const pinnedOpacity = scrollY.interpolate({
+    inputRange: [0, PINNED_FADE_DISTANCE],
+    outputRange: [1, 0],
+    extrapolate: "clamp",
+  });
+
+  // Each card slides off whichever screen edge it already sits against, travelling
+  // exactly far enough to clear it. The two bottom cards span the full width between
+  // them, so their own widths are the distances; the solar card is inset, so it also
+  // has to cover its left gutter — taken from the measured rect when there is one.
+  const slideOff = (distance) =>
+    scrollY.interpolate({
+      inputRange: [0, PINNED_FADE_DISTANCE],
+      outputRange: [0, distance],
+      extrapolate: "clamp",
+    });
+  const solarSlideX = slideOff(
+    -(solarCardRect ? solarCardRect.x + solarCardRect.width : width)
+  );
+  const loadSlideX = slideOff(-loadCardWidth);
+  const batterySlideX = slideOff(batteryCardWidth);
+
+  // March the dots along the line, one dot-pitch per cycle, forever.
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(dotPhase, {
+        toValue: 1,
+        duration: 900,
+        easing: Easing.linear,
+        // strokeDashoffset is an SVG prop, not a transform — it cannot be
+        // native-driven, so this one stays on the JS driver.
+        useNativeDriver: false,
+      })
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [dotPhase]);
+
+  const panelPoint = panelAnchorOnScreen(width, height);
+
+  // Tested against the figure actually on screen, so the line never turns green
+  // while the card still reads 0.00.
+  const producing = Number(kw(production)) > 0;
+
+  // Idle, the dots run card -> roof. Once the panels are generating, the flow is
+  // real and points the other way: roof -> card. A negative dash offset advances
+  // the pattern along the path, so a positive one walks it back.
+  const dotOffset = dotPhase.interpolate({
+    inputRange: [0, 1],
+    outputRange: producing ? [0, DOT_PITCH] : [0, -DOT_PITCH],
+  });
+
+  // Breathe the stroke while generating; hold it steady when idle.
+  useEffect(() => {
+    if (!producing) {
+      pulse.setValue(0);
+      return undefined;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          toValue: 1,
+          duration: 750,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: false,
+        }),
+        Animated.timing(pulse, {
+          toValue: 0,
+          duration: 750,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: false,
+        }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [producing, pulse]);
+
+  const dotOpacity = producing
+    ? pulse.interpolate({ inputRange: [0, 1], outputRange: [0.4, 1] })
+    : 1;
+
+  // An elbow rather than a diagonal: drop straight out of the card's bottom edge,
+  // turn once through 90 degrees, then run flat into the panel array. The corner is
+  // eased with a small arc so the marching dots round it instead of stacking up.
+  const pointerPath = (() => {
+    if (!solarCardRect) return null;
+    const startX = Math.round(solarCardRect.x + solarCardRect.width / 2);
+    const startY = Math.round(solarCardRect.y + solarCardRect.height);
+    const endX = Math.round(panelPoint.x);
+    const endY = Math.round(panelPoint.y);
+    // Nothing sensible to draw if the anchor sits above the card's bottom edge.
+    if (endY <= startY) return null;
+    const turnRight = endX >= startX;
+    // Descending then turning right is counter-clockwise on screen, which is
+    // sweep-flag 0 (SVG measures positive angles clockwise in its y-down space).
+    // The opposite flag puts the arc's centre on the incoming path and cusps.
+    const sweep = turnRight ? 0 : 1;
+    const radius = Math.min(14, Math.abs(endX - startX), endY - startY);
+    if (radius < 2) return `M ${startX} ${startY} L ${endX} ${endY}`;
+    return [
+      `M ${startX} ${startY}`,
+      `L ${startX} ${endY - radius}`,
+      `A ${radius} ${radius} 0 0 ${sweep} ${startX + (turnRight ? radius : -radius)} ${endY}`,
+      `L ${endX} ${endY}`,
+    ].join(" ");
+  })();
+
+  // Window coordinates, so the line's origin is correct regardless of how the card
+  // is nested. The card is shrink-wrapped around a live number, so this re-fires
+  // while the width morphs — ignore sub-2pt moves to keep that from re-rendering
+  // the screen on every frame of the animation.
+  const measureSolarCard = () => {
+    solarCardRef.current?.measureInWindow((x, y, cardWidth, cardHeight) => {
+      if (!cardWidth || !cardHeight) return;
+      setSolarCardRect((previous) => {
+        if (
+          previous &&
+          Math.abs(previous.x - x) < 2 &&
+          Math.abs(previous.y - y) < 2 &&
+          Math.abs(previous.width - cardWidth) < 2 &&
+          Math.abs(previous.height - cardHeight) < 2
+        ) {
+          return previous;
+        }
+        return { x, y, width: cardWidth, height: cardHeight };
+      });
+    });
+  };
 
   return (
     <View style={styles.screen}>
@@ -595,136 +812,33 @@ export default function HomeScreen({ navigation }) {
         pointerEvents="none"
       />
 
-      <ScrollView
+      <Animated.ScrollView
+        ref={scrollRef}
         style={styles.scroll}
         scrollEnabled={!graphScrubbing}
         contentContainerStyle={{
-          paddingTop: insets.top + 8,
+          // Everything above is pinned, so the scrolling content starts just below
+          // the pinned row and rises into view as those fade out.
+          paddingTop: height - TAB_BAR_RESERVE + 12,
           paddingBottom: 150,
         }}
         showsVerticalScrollIndicator={false}
+        scrollEventThrottle={16}
+        onScroll={Animated.event(
+          [{ nativeEvent: { contentOffset: { y: scrollY } } }],
+          {
+            useNativeDriver: true,
+            // Flips once per crossing, not per frame.
+            listener: (e) => {
+              const hidden =
+                e.nativeEvent.contentOffset.y >= PINNED_FADE_DISTANCE - 1;
+              setPinnedHidden((previous) => (previous === hidden ? previous : hidden));
+            },
+          }
+        )}
       >
-        <View style={styles.header}>
-          <View style={styles.headerCopy}>
-            <Text style={styles.hello}>
-              {t("home.hello", { name: name.trim() || "James" })}
-            </Text>
-            <Text style={styles.greeting}>{t(`home.${background.key}`)}</Text>
-          </View>
-          <Pressable onPress={() => navigation.navigate("Settings")} hitSlop={8}>
-            <HeaderGlass>
-              <Ionicons name="notifications-outline" size={20} color="#fff" />
-              <View style={styles.bellDot} />
-            </HeaderGlass>
-          </Pressable>
-        </View>
-
-        <View style={styles.hero}>
-          <GlassCard
-            style={styles.statCard}
-            glassStyle="clear"
-            tint="rgba(0,0,0,0.2)"
-            blur={8}
-            border="rgba(255,255,255,0.45)"
-          >
-            <Text style={styles.heroLabel}>{t("energy.solar")}</Text>
-            <LiveStat value={kw(production)} valueStyle={statValueStyle} unitStyle={statUnitStyle} />
-          </GlassCard>
-          <GlassCard
-            style={styles.statCard}
-            glassStyle="clear"
-            tint="rgba(0,0,0,0.2)"
-            blur={8}
-            border="rgba(255,255,255,0.45)"
-          >
-            <Text style={styles.heroLabel}>{t("home.load")}</Text>
-            <LiveStat value={kw(load)} valueStyle={statValueStyle} unitStyle={statUnitStyle} />
-          </GlassCard>
-        </View>
-
-        <View style={styles.content}>
-          {batteries.length > 0 && (
-            <GlassCard
-              style={styles.batteryCard}
-              glassStyle="clear"
-              tint="rgba(0,0,0,0.2)"
-              blur={8}
-              border="rgba(255,255,255,0.45)"
-            >
-              <View>
-                <Text style={styles.heroLabel}>{t("home.batterySystem")}</Text>
-                <View style={styles.batteryStats}>
-                  <View style={styles.batteryStatColumn}>
-                    <LiveStat
-                      value={batteryAmps.toFixed(1)}
-                      unit="A"
-                      valueStyle={statValueStyle}
-                      unitStyle={statUnitStyle}
-                    />
-                  </View>
-                  <View style={styles.batteryStatColumn}>
-                    <LiveStat
-                      value={String(Math.round(batteryWatts))}
-                      unit="W"
-                      valueStyle={statValueStyle}
-                      unitStyle={statUnitStyle}
-                    />
-                  </View>
-                </View>
-              </View>
-              <View style={styles.batteryScrollWrap}>
-                <Animated.ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  style={styles.batteryRow}
-                  contentContainerStyle={{ gap: batteryGap }}
-                  snapToInterval={batteryPageStride}
-                  decelerationRate="fast"
-                  scrollEventThrottle={16}
-                  onScroll={Animated.event(
-                    [{ nativeEvent: { contentOffset: { x: batteryScrollX } } }],
-                    { useNativeDriver: false }
-                  )}
-                >
-                  {batteries.map((reading) => (
-                    <BatteryItem
-                      key={reading.device_id}
-                      reading={reading}
-                      name={resolveDeviceName(names, reading)}
-                      online={reading.online}
-                      width={batteryItemWidth}
-                      onPress={() => setSelectedBatteryId(reading.device_id)}
-                    />
-                  ))}
-                </Animated.ScrollView>
-              </View>
-              {batteries.length > batteryPerView && (
-                <BatteryDots
-                  count={Math.ceil(batteries.length / batteryPerView)}
-                  scrollX={batteryScrollX}
-                  stride={batteryPageStride}
-                />
-              )}
-              {/* Blur the left/right edges over the full card height, so items
-                  fade out as they scroll past the card's sides. */}
-              <MaskedView
-                pointerEvents="none"
-                style={styles.batteryEdgeFade}
-                maskElement={
-                  <LinearGradient
-                    colors={["#000", "transparent", "transparent", "#000"]}
-                    locations={[0, 0.1, 0.9, 1]}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 0 }}
-                    style={StyleSheet.absoluteFill}
-                  />
-                }
-              >
-                <BlurView intensity={28} tint="default" style={StyleSheet.absoluteFill} />
-              </MaskedView>
-            </GlassCard>
-          )}
-
+        {/* Keyed alongside the pinned layer so the chart cards' glass is remounted too. */}
+        <View key={focusTick} style={styles.content}>
           <GlassCard
             style={styles.todayCard}
             glassStyle="clear"
@@ -787,7 +901,7 @@ export default function HomeScreen({ navigation }) {
 
           {!connected && <Text style={styles.offline}>{t("home.disconnected")}</Text>}
         </View>
-      </ScrollView>
+      </Animated.ScrollView>
 
       {/* Top fade-to-blur, mirroring the TabBar's bottom edge effect. */}
       <MaskedView
@@ -803,6 +917,269 @@ export default function HomeScreen({ navigation }) {
       >
         <BlurView intensity={42} tint="default" style={StyleSheet.absoluteFill} />
       </MaskedView>
+
+      {/* Pinned above the scroll (and above the top blur, so they stay crisp): the
+          solar reading up top and the load/battery row above the tab bar both hold
+          their place while the page moves under them. On scroll the cards slide off
+          the nearest screen edge while the greeting and pointer line fade. Once gone
+          they are also made untappable, so nothing invisible catches touches. */}
+      <Animated.View
+        key={focusTick}
+        pointerEvents={pinnedHidden ? "none" : "box-none"}
+        style={StyleSheet.absoluteFill}
+      >
+        {/* Dotted pointer from the card's bottom edge to the roof's panel array. */}
+        {pointerPath && (
+          <Animated.View
+            pointerEvents="none"
+            style={[StyleSheet.absoluteFill, { opacity: pinnedOpacity }]}
+          >
+            <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
+              <AnimatedPath
+                d={pointerPath}
+                fill="none"
+                stroke={producing ? SOLAR_GREEN : "rgba(255,255,255,0.85)"}
+                strokeOpacity={dotOpacity}
+                strokeWidth={DOT_WIDTH}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                // A zero-length dash with a round cap renders as a dot.
+                strokeDasharray={`0.01 ${DOT_PITCH}`}
+                strokeDashoffset={dotOffset}
+              />
+            </Svg>
+          </Animated.View>
+        )}
+
+        <View
+          pointerEvents="box-none"
+          style={[styles.pinnedHead, { top: insets.top + 8 }]}
+        >
+          <Animated.View style={[styles.header, { opacity: pinnedOpacity }]}>
+            <View style={styles.headerCopy}>
+              <Text style={styles.hello}>
+                {t("home.hello", { name: name.trim() || "James" })}
+              </Text>
+              <Text style={styles.greeting}>{t(`home.${background.key}`)}</Text>
+            </View>
+            <Pressable onPress={() => navigation.navigate("Settings")} hitSlop={8}>
+              <HeaderGlass>
+                <Ionicons name="notifications-outline" size={20} color="#fff" />
+                <View style={styles.bellDot} />
+              </HeaderGlass>
+            </Pressable>
+          </Animated.View>
+
+          {/* pointerEvents none so the pinned card never eats scroll gestures. */}
+          <Animated.View
+            style={[styles.hero, { transform: [{ translateX: solarSlideX }] }]}
+            pointerEvents="none"
+          >
+            <View ref={solarCardRef} onLayout={measureSolarCard} collapsable={false}>
+              <GlassCard
+                style={styles.statCard}
+                glassStyle="clear"
+                tint="rgba(0,0,0,0.2)"
+                blur={8}
+                border="rgba(255,255,255,0.45)"
+              >
+                <LiveStat
+                  value={kw(production)}
+                  valueStyle={statValueStyle}
+                  unitStyle={statUnitStyle}
+                />
+              </GlassCard>
+            </View>
+          </Animated.View>
+        </View>
+        <View style={[styles.pinnedFoot, { bottom: TAB_BAR_RESERVE }]}>
+            {/* One full-bleed row: load card off the left screen edge, battery card off
+                the right, each squared off on the edge it touches. */}
+            <View style={styles.edgeRow}>
+            {/* Total load stays the backend's cross-inverter figure; the carousel
+                breaks it down per inverter underneath. The wrapper carries the width
+                and the slide, so the card itself can stretch to the row's height. */}
+            <Animated.View
+              style={{
+                width: loadCardWidth,
+                transform: [{ translateX: loadSlideX }],
+              }}
+            >
+            <GlassCard
+              style={styles.loadCard}
+              radius={styles.loadCardRadius}
+              glassStyle="clear"
+              tint="rgba(0,0,0,0.2)"
+              blur={8}
+              border="rgba(255,255,255,0.45)"
+            >
+              <Text style={styles.heroLabel}>{t("home.load")}</Text>
+              <LiveStat
+                value={kw(load)}
+                valueStyle={loadStatValueStyle}
+                unitStyle={loadStatUnitStyle}
+              />
+
+              {inverters.length > 0 && (
+                <View style={styles.inverterScrollWrap}>
+                  <Animated.ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.inverterRow}
+                    snapToInterval={inverterStride}
+                    decelerationRate="fast"
+                    scrollEventThrottle={16}
+                    onScroll={Animated.event(
+                      [{ nativeEvent: { contentOffset: { x: inverterScrollX } } }],
+                      { useNativeDriver: false }
+                    )}
+                  >
+                    {inverters.map((reading) => {
+                      // The same photo the devices page shows. It renders the art only
+                      // when one exists; the generic glyph stands in here so an inverter
+                      // with no image still reads as a tile rather than a gap.
+                      const art = deviceImageSource(imageOf(reading.device_id));
+                      return (
+                        <View
+                          key={reading.device_id}
+                          style={[styles.inverterItem, { width: inverterItemWidth }]}
+                        >
+                          <Text style={styles.inverterName} numberOfLines={1}>
+                            {resolveDeviceName(names, reading)}
+                          </Text>
+                          <View style={styles.inverterArtWrap}>
+                            {art ? (
+                              <Image
+                                source={art}
+                                style={[
+                                  styles.inverterArt,
+                                  !reading.online && styles.inverterArtOffline,
+                                ]}
+                                resizeMode="contain"
+                              />
+                            ) : (
+                              <DeviceTypeIcon
+                                type="inverter"
+                                size={130}
+                                color="rgba(255,255,255,0.9)"
+                              />
+                            )}
+                          </View>
+                          {/* Same shape as the devices page's FocusedStats: centred
+                              column per metric, glyph above the value, no text label. */}
+                          <View style={styles.inverterStats}>
+                            <View style={styles.inverterStat}>
+                              <StatIcon name="solar" size={20} />
+                              <LiveStat
+                                value={kw(chargePower(reading))}
+                                valueStyle={styles.inverterValue}
+                                unitStyle={styles.inverterUnit}
+                                gap={3}
+                              />
+                            </View>
+                            <View style={styles.inverterStat}>
+                              <StatIcon name="load" size={20} />
+                              <LiveStat
+                                value={kw(usedPower(reading))}
+                                valueStyle={styles.inverterValue}
+                                unitStyle={styles.inverterUnit}
+                                gap={3}
+                              />
+                            </View>
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </Animated.ScrollView>
+                </View>
+              )}
+              {inverters.length > 1 && (
+                <CarouselDots
+                  count={inverters.length}
+                  scrollX={inverterScrollX}
+                  stride={inverterStride}
+                />
+              )}
+            </GlassCard>
+            </Animated.View>
+
+            {batteries.length > 0 && (
+              <Animated.View
+                style={{
+                  width: batteryCardWidth,
+                  transform: [{ translateX: batterySlideX }],
+                }}
+              >
+              <GlassCard
+                style={styles.batteryCard}
+                radius={styles.batteryCardRadius}
+                glassStyle="clear"
+                tint="rgba(0,0,0,0.2)"
+                blur={8}
+                border="rgba(255,255,255,0.45)"
+              >
+                <Text
+                  style={styles.heroLabel}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.7}
+                >
+                  {t("home.battery")}
+                </Text>
+                {/* One cell standing for the whole bank, with the bank's average
+                    voltage and its live current and power stacked beneath it. */}
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.batterySingle,
+                    onlyBattery && pressed && styles.batteryItemPressed,
+                  ]}
+                  disabled={!onlyBattery}
+                  onPress={
+                    onlyBattery
+                      ? () => setSelectedBatteryId(onlyBattery.device_id)
+                      : undefined
+                  }
+                  accessibilityRole={onlyBattery ? "button" : undefined}
+                >
+                  <BatteryCell
+                    fill={batteryFill(averageBatteryVoltage)}
+                    online={anyBatteryOnline}
+                    width={batteryCellWidth}
+                    capWidth={Math.round(batteryCellWidth * 0.3)}
+                  />
+                  {/* Absorbs whatever height the row has to spare, so the readings
+                      settle at the bottom of the card instead of at a fixed offset. */}
+                  <View style={styles.batterySpacer} />
+                  <View style={styles.batteryReadouts}>
+                    <LiveStat
+                      value={averageBatteryVoltage.toFixed(1)}
+                      unit="V"
+                      valueStyle={batteryReadoutValueStyle}
+                      unitStyle={batteryReadoutUnitStyle}
+                      gap={2}
+                    />
+                    <LiveStat
+                      value={batteryAmps.toFixed(1)}
+                      unit="A"
+                      valueStyle={batteryReadoutValueStyle}
+                      unitStyle={batteryReadoutUnitStyle}
+                      gap={2}
+                    />
+                    <LiveStat
+                      value={String(Math.round(batteryWatts))}
+                      unit="W"
+                      valueStyle={batteryReadoutValueStyle}
+                      unitStyle={batteryReadoutUnitStyle}
+                      gap={2}
+                    />
+                  </View>
+                </Pressable>
+              </GlassCard>
+              </Animated.View>
+            )}
+            </View>
+        </View>
+      </Animated.View>
 
       <BatteryInfoSheet
         reading={selectedBattery}
@@ -860,14 +1237,31 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     backgroundColor: colors.yellow,
   },
+  pinnedHead: { position: "absolute", left: 0, right: 0 },
+  pinnedFoot: { position: "absolute", left: 0, right: 0 },
+  // Page indicator under the inverter strip.
+  dotsRow: {
+    flexDirection: "row",
+    alignSelf: "center",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 14,
+  },
+  dot: { height: 6, borderRadius: 3, backgroundColor: colors.white },
   hero: {
     flexDirection: "row",
+    // Cross-axis only: keeps the card at its natural height rather than stretching.
+    alignItems: "flex-start",
     gap: 12,
     paddingHorizontal: 16,
-    paddingTop: 14,
+    paddingTop: 34,
     paddingBottom: 12,
   },
-  statCard: { flex: 1, padding: 18, alignItems: "center" },
+  // No `flex` on purpose. In a row a child without flex-grow is sized by its content,
+  // so the card hugs the reading. LiveStat drives its own width with a JS-driven
+  // Animated value (useNativeDriver: false), which re-runs layout each frame — so the
+  // card morphs wider/narrower with the number instead of jumping between widths.
+  statCard: { padding: 18, alignItems: "center" },
   heroLabel: {
     color: "rgba(255,255,255,0.9)",
     fontSize: 30,
@@ -886,24 +1280,75 @@ const styles = StyleSheet.create({
   },
   heroUnit: { color: "#fff", fontSize: 44, fontWeight: "300", ...shadow },
   content: { paddingHorizontal: 16, gap: 12 },
-  batteryCard: { padding: 18, borderWidth: 0 },
+  // Pinned at screen width now, so no negative inset is needed to reach the edges.
+  // `stretch` keeps the shorter card the same height as the taller one.
+  edgeRow: {
+    flexDirection: "row",
+    alignItems: "stretch",
+    gap: CARD_ROW_GAP,
+  },
+  // `flex: 1` fills the slide wrapper, which is what the row stretches.
+  loadCard: { flex: 1, padding: 18 },
+  // Squared where it meets the screen edge, rounded on the inner side.
+  loadCardRadius: {
+    borderTopLeftRadius: 0,
+    borderBottomLeftRadius: 0,
+    borderTopRightRadius: radii.lg,
+    borderBottomRightRadius: radii.lg,
+  },
+  batteryCardRadius: {
+    borderTopLeftRadius: radii.lg,
+    borderBottomLeftRadius: radii.lg,
+    borderTopRightRadius: 0,
+    borderBottomRightRadius: 0,
+  },
+  // Bleeds to the card's edges (cancels its 18pt padding) so tiles scroll edge to edge.
+  inverterScrollWrap: { marginHorizontal: -18, marginTop: 20 },
+  inverterRow: { paddingHorizontal: 18, gap: 12 },
+  inverterItem: { alignItems: "center" },
+  inverterArtWrap: { height: 178, alignSelf: "stretch", alignItems: "center", justifyContent: "center" },
+  inverterArt: { width: "100%", height: "100%" },
+  inverterArtOffline: { opacity: 0.35 },
+  // Sits above the photo now, so it leads the tile.
+  inverterName: {
+    color: "rgba(255,255,255,0.9)",
+    fontSize: 19,
+    fontWeight: "600",
+    marginBottom: 8,
+    ...shadow,
+  },
+  // Mirrors the devices page's `stats` / `stat` pair, at the smaller scale a
+  // carousel tile allows. Pinned over the bottom of the art rather than stacked
+  // under it, so the photo gets the tile's full height.
+  // Stacked below the photo in normal flow, no longer laid over it.
+  inverterStats: {
+    flexDirection: "row",
+    justifyContent: "space-around",
+    alignSelf: "stretch",
+    marginTop: 12,
+  },
+  inverterStat: { alignItems: "center", flex: 1 },
+  inverterValue: { color: colors.white, fontSize: 22, fontWeight: "800", letterSpacing: -0.4, ...shadow },
+  inverterUnit: { color: "rgba(255,255,255,0.75)", fontSize: 13, fontWeight: "700", ...shadow },
+  batteryCard: { flex: 1, padding: 18, borderWidth: 0 },
   batteryLight: { color: colors.white, ...shadow },
-  batteryStats: { flexDirection: "row", alignItems: "center", paddingTop: 2 },
-  batteryStatColumn: { flex: 1, alignItems: "center" },
-  batteryScrollWrap: { marginHorizontal: -18, marginTop: 22 },
-  batteryRow: { paddingHorizontal: 18 },
-  // Spans the whole card: negative insets cancel the card's 18pt padding so the
-  // blurred edges reach the card sides (clipped to its rounded corners).
-  batteryEdgeFade: { position: "absolute", top: -18, bottom: -18, left: -18, right: -18 },
-  batteryItem: { alignItems: "center" },
+  // The single cell standing in for the whole bank. Takes the card's leftover height
+  // so its spacer can push the readings to the bottom.
+  batterySingle: { flex: 1, alignItems: "center", marginTop: 34 },
+  // `minHeight` is the floor: if the card ever runs out of slack the readings still
+  // keep clear of the battery rather than collapsing onto it.
+  batterySpacer: { flex: 1, minHeight: 28 },
+  // All three readings stack under the cell — the card is the narrow half of the
+  // row and cannot fit them across it — set well clear of the battery graphic.
+  batteryReadouts: { alignItems: "center", gap: 3 },
   batteryItemPressed: { opacity: 0.6 },
   batteryCell: { alignItems: "center" },
   batteryCellOffline: { opacity: 0.55 },
+  // Width is supplied at render time, scaled from the cell — see `batteryCellWidth`.
   batteryCap: {
-    width: 16,
-    height: 4,
-    borderTopLeftRadius: 2,
-    borderTopRightRadius: 2,
+    height: 6,
+    borderTopLeftRadius: 3,
+    borderTopRightRadius: 3,
     borderCurve: "continuous",
     backgroundColor: "rgba(255,255,255,0.55)",
     marginBottom: -1,
@@ -912,9 +1357,8 @@ const styles = StyleSheet.create({
   // The body is a single clear GlassView; the green liquid sits directly under it,
   // so no opaque background here — just the clip bounds and the rim.
   batteryShape: {
-    width: 52,
-    height: 90,
-    borderRadius: 9,
+    height: 166,
+    borderRadius: 13,
     borderCurve: "continuous",
     overflow: "hidden",
   },
@@ -923,11 +1367,11 @@ const styles = StyleSheet.create({
   // radius minus the inset, so the inner pill stays concentric with the glass body.
   batteryFluidTrack: {
     position: "absolute",
-    top: 7,
-    left: 7,
-    right: 7,
-    bottom: 7,
-    borderRadius: 2,
+    top: 10,
+    left: 10,
+    right: 10,
+    bottom: 10,
+    borderRadius: 3,
     borderCurve: "continuous",
     overflow: "hidden",
     justifyContent: "flex-end",
@@ -942,65 +1386,25 @@ const styles = StyleSheet.create({
     left: "-35%",
     width: "170%",
     aspectRatio: 1,
-    top: -5,
-    borderRadius: 26,
+    top: -7,
+    borderRadius: 46,
     borderCurve: "continuous",
   },
-  batteryWaveTop: { top: -11 },
+  batteryWaveTop: { top: -16 },
   // Match the shape's radius so the glass renders its own rounded corners (its
   // refraction follows the curve) rather than being clipped at square corners.
-  batteryGlass: { borderRadius: 9, borderCurve: "continuous" },
+  batteryGlass: { borderRadius: 13, borderCurve: "continuous" },
   batteryGlassFallback: { backgroundColor: "rgba(255,255,255,0.14)" },
-  batteryDotsRow: {
-    flexDirection: "row",
-    alignSelf: "center",
-    alignItems: "center",
-    gap: 6,
-    marginTop: 12,
-  },
-  batteryDot: {
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.white,
-  },
-  batteryName: {
-    marginTop: 7,
-    maxWidth: "100%",
+  // Voltage, current and power all share one size under the cell.
+  batteryReadoutValue: {
     color: colors.white,
-    fontSize: 11,
-    fontWeight: "700",
-    textAlign: "center",
-    ...shadow,
-  },
-  batteryReadouts: {
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 1,
-    marginTop: 3,
-  },
-  batteryReadout: { flexDirection: "row", alignItems: "center", gap: 3 },
-  batteryVoltValue: {
-    color: colors.white,
-    fontSize: 14,
+    fontSize: 17,
     fontWeight: "700",
     ...shadow,
   },
-  batteryVoltUnit: {
+  batteryReadoutUnit: {
     color: "rgba(255,255,255,0.82)",
-    fontSize: 14,
-    fontWeight: "500",
-    ...shadow,
-  },
-  batteryAmpValue: {
-    color: "rgba(255,255,255,0.86)",
-    fontSize: 14,
-    fontWeight: "700",
-    ...shadow,
-  },
-  batteryAmpUnit: {
-    color: "rgba(255,255,255,0.72)",
-    fontSize: 14,
+    fontSize: 17,
     fontWeight: "500",
     ...shadow,
   },

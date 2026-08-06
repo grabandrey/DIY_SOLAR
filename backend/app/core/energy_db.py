@@ -17,8 +17,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, List, Mapping, Sequence, Tuple
 
-DailyRow = Tuple[str, str, float, float, float, float]
-StateRow = Tuple[str, str, float, float, float]
+DailyRow = Tuple[str, str, float, float, float, float, float]
+StateRow = Tuple[str, str, float, float, float, float]
 SampleRow = Tuple[str, str, int, float, float]
 
 
@@ -34,8 +34,8 @@ class EnergyDB(ABC):
 
     @abstractmethod
     def load_daily(self, cutoff: str) -> List[Any]:
-        """Rows of (day, device_id, solar_wh, consumption_wh, hardware_solar_wh, updated_at)
-        on/after ``cutoff``."""
+        """Rows of (day, device_id, solar_wh, consumption_wh, grid_wh, hardware_solar_wh,
+        updated_at) on/after ``cutoff``."""
 
     @abstractmethod
     def load_state(self) -> List[Any]:
@@ -43,7 +43,12 @@ class EnergyDB(ABC):
 
     @abstractmethod
     def fetch_summary(self, day: str) -> List[Any]:
-        """Rows of (device_id, solar_wh, consumption_wh) for ``day``."""
+        """Rows of (device_id, solar_wh, consumption_wh, grid_wh) for ``day``."""
+
+    @abstractmethod
+    def fetch_history(self, start_day: str, end_day: str) -> List[Any]:
+        """One row per day in the inclusive range, totalled across devices:
+        (day, solar_wh, consumption_wh, grid_wh). Days with no data are absent."""
 
     @abstractmethod
     def fetch_series(self, day: str) -> List[Any]:
@@ -85,6 +90,7 @@ class SqliteBackend(EnergyDB):
                     device_id TEXT NOT NULL,
                     solar_wh REAL NOT NULL DEFAULT 0,
                     consumption_wh REAL NOT NULL DEFAULT 0,
+                    grid_wh REAL NOT NULL DEFAULT 0,
                     hardware_solar_wh REAL NOT NULL DEFAULT 0,
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (day, device_id)
@@ -95,7 +101,8 @@ class SqliteBackend(EnergyDB):
                     day TEXT NOT NULL,
                     sample_ts REAL NOT NULL,
                     solar_power_w REAL NOT NULL,
-                    load_power_w REAL NOT NULL
+                    load_power_w REAL NOT NULL,
+                    grid_power_w REAL NOT NULL DEFAULT 0
                 ) WITHOUT ROWID;
 
                 CREATE TABLE IF NOT EXISTS energy_samples (
@@ -108,6 +115,18 @@ class SqliteBackend(EnergyDB):
                 ) WITHOUT ROWID;
                 """
             )
+            self._add_missing_column("daily_energy", "grid_wh", "REAL NOT NULL DEFAULT 0")
+            self._add_missing_column(
+                "energy_state", "grid_power_w", "REAL NOT NULL DEFAULT 0"
+            )
+
+    def _add_missing_column(self, table: str, column: str, ddl: str) -> None:
+        """SQLite has no ADD COLUMN IF NOT EXISTS, so check the table first."""
+        existing = {
+            row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")
+        }
+        if column not in existing:
+            self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     def purge_before(self, cutoff: str) -> None:
         with self._db:
@@ -117,7 +136,7 @@ class SqliteBackend(EnergyDB):
     def load_daily(self, cutoff: str) -> List[Any]:
         return self._db.execute(
             """
-            SELECT day, device_id, solar_wh, consumption_wh,
+            SELECT day, device_id, solar_wh, consumption_wh, grid_wh,
                    hardware_solar_wh, updated_at
             FROM daily_energy
             WHERE day >= ?
@@ -131,12 +150,27 @@ class SqliteBackend(EnergyDB):
     def fetch_summary(self, day: str) -> List[Any]:
         return self._db.execute(
             """
-            SELECT device_id, solar_wh, consumption_wh
+            SELECT device_id, solar_wh, consumption_wh, grid_wh
             FROM daily_energy
             WHERE day = ?
             ORDER BY device_id
             """,
             (day,),
+        ).fetchall()
+
+    def fetch_history(self, start_day: str, end_day: str) -> List[Any]:
+        return self._db.execute(
+            """
+            SELECT day,
+                   SUM(solar_wh) AS solar_wh,
+                   SUM(consumption_wh) AS consumption_wh,
+                   SUM(grid_wh) AS grid_wh
+            FROM daily_energy
+            WHERE day >= ? AND day <= ?
+            GROUP BY day
+            ORDER BY day
+            """,
+            (start_day, end_day),
         ).fetchall()
 
     def fetch_series(self, day: str) -> List[Any]:
@@ -155,12 +189,13 @@ class SqliteBackend(EnergyDB):
                 self._db.executemany(
                     """
                     INSERT INTO daily_energy (
-                        day, device_id, solar_wh, consumption_wh,
+                        day, device_id, solar_wh, consumption_wh, grid_wh,
                         hardware_solar_wh, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(day, device_id) DO UPDATE SET
                         solar_wh = excluded.solar_wh,
                         consumption_wh = excluded.consumption_wh,
+                        grid_wh = excluded.grid_wh,
                         hardware_solar_wh = excluded.hardware_solar_wh,
                         updated_at = excluded.updated_at
                     """,
@@ -170,13 +205,15 @@ class SqliteBackend(EnergyDB):
                 self._db.executemany(
                     """
                     INSERT INTO energy_state (
-                        device_id, day, sample_ts, solar_power_w, load_power_w
-                    ) VALUES (?, ?, ?, ?, ?)
+                        device_id, day, sample_ts, solar_power_w, load_power_w,
+                        grid_power_w
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(device_id) DO UPDATE SET
                         day = excluded.day,
                         sample_ts = excluded.sample_ts,
                         solar_power_w = excluded.solar_power_w,
-                        load_power_w = excluded.load_power_w
+                        load_power_w = excluded.load_power_w,
+                        grid_power_w = excluded.grid_power_w
                     """,
                     state_rows,
                 )
@@ -240,6 +277,7 @@ class PostgresBackend(EnergyDB):
                 device_id TEXT NOT NULL,
                 solar_wh DOUBLE PRECISION NOT NULL DEFAULT 0,
                 consumption_wh DOUBLE PRECISION NOT NULL DEFAULT 0,
+                grid_wh DOUBLE PRECISION NOT NULL DEFAULT 0,
                 hardware_solar_wh DOUBLE PRECISION NOT NULL DEFAULT 0,
                 updated_at DOUBLE PRECISION NOT NULL,
                 PRIMARY KEY (day, device_id)
@@ -253,7 +291,8 @@ class PostgresBackend(EnergyDB):
                 day TEXT NOT NULL,
                 sample_ts DOUBLE PRECISION NOT NULL,
                 solar_power_w DOUBLE PRECISION NOT NULL,
-                load_power_w DOUBLE PRECISION NOT NULL
+                load_power_w DOUBLE PRECISION NOT NULL,
+                grid_power_w DOUBLE PRECISION NOT NULL DEFAULT 0
             )
             """
         )
@@ -269,6 +308,14 @@ class PostgresBackend(EnergyDB):
             )
             """
         )
+        self._conn.execute(
+            "ALTER TABLE daily_energy "
+            "ADD COLUMN IF NOT EXISTS grid_wh DOUBLE PRECISION NOT NULL DEFAULT 0"
+        )
+        self._conn.execute(
+            "ALTER TABLE energy_state "
+            "ADD COLUMN IF NOT EXISTS grid_power_w DOUBLE PRECISION NOT NULL DEFAULT 0"
+        )
 
     def purge_before(self, cutoff: str) -> None:
         self._conn.execute("DELETE FROM daily_energy WHERE day < %s", (cutoff,))
@@ -277,7 +324,7 @@ class PostgresBackend(EnergyDB):
     def load_daily(self, cutoff: str) -> List[Any]:
         return self._conn.execute(
             """
-            SELECT day, device_id, solar_wh, consumption_wh,
+            SELECT day, device_id, solar_wh, consumption_wh, grid_wh,
                    hardware_solar_wh, updated_at
             FROM daily_energy
             WHERE day >= %s
@@ -291,12 +338,27 @@ class PostgresBackend(EnergyDB):
     def fetch_summary(self, day: str) -> List[Any]:
         return self._conn.execute(
             """
-            SELECT device_id, solar_wh, consumption_wh
+            SELECT device_id, solar_wh, consumption_wh, grid_wh
             FROM daily_energy
             WHERE day = %s
             ORDER BY device_id
             """,
             (day,),
+        ).fetchall()
+
+    def fetch_history(self, start_day: str, end_day: str) -> List[Any]:
+        return self._conn.execute(
+            """
+            SELECT day,
+                   SUM(solar_wh) AS solar_wh,
+                   SUM(consumption_wh) AS consumption_wh,
+                   SUM(grid_wh) AS grid_wh
+            FROM daily_energy
+            WHERE day >= %s AND day <= %s
+            GROUP BY day
+            ORDER BY day
+            """,
+            (start_day, end_day),
         ).fetchall()
 
     def fetch_series(self, day: str) -> List[Any]:
@@ -315,12 +377,13 @@ class PostgresBackend(EnergyDB):
                 cur.executemany(
                     """
                     INSERT INTO daily_energy (
-                        day, device_id, solar_wh, consumption_wh,
+                        day, device_id, solar_wh, consumption_wh, grid_wh,
                         hardware_solar_wh, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (day, device_id) DO UPDATE SET
                         solar_wh = EXCLUDED.solar_wh,
                         consumption_wh = EXCLUDED.consumption_wh,
+                        grid_wh = EXCLUDED.grid_wh,
                         hardware_solar_wh = EXCLUDED.hardware_solar_wh,
                         updated_at = EXCLUDED.updated_at
                     """,
@@ -330,13 +393,15 @@ class PostgresBackend(EnergyDB):
                 cur.executemany(
                     """
                     INSERT INTO energy_state (
-                        device_id, day, sample_ts, solar_power_w, load_power_w
-                    ) VALUES (%s, %s, %s, %s, %s)
+                        device_id, day, sample_ts, solar_power_w, load_power_w,
+                        grid_power_w
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (device_id) DO UPDATE SET
                         day = EXCLUDED.day,
                         sample_ts = EXCLUDED.sample_ts,
                         solar_power_w = EXCLUDED.solar_power_w,
-                        load_power_w = EXCLUDED.load_power_w
+                        load_power_w = EXCLUDED.load_power_w,
+                        grid_power_w = EXCLUDED.grid_power_w
                     """,
                     state_rows,
                 )

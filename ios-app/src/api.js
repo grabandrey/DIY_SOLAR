@@ -343,6 +343,39 @@ export function useDailyEnergy(intervalMs = 10000) {
   return daily;
 }
 
+// Daily totals over a trailing window, for the analytics page. Refreshed slowly —
+// these are whole-day aggregates, so there is nothing to gain from polling hard.
+export function useEnergyHistory(days = 90, intervalMs = 60000) {
+  const { baseUrl } = useBackend();
+  const [history, setHistory] = useState({ start: null, end: null, days: [] });
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    const load = () => {
+      req(baseUrl, `/energy/history?days=${days}`)
+        .then((value) => {
+          if (!active) return;
+          setHistory(value);
+          setFailed(false);
+        })
+        .catch(() => active && setFailed(true))
+        .finally(() => active && setLoading(false));
+    };
+
+    load();
+    const id = setInterval(load, intervalMs);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [baseUrl, days, intervalMs]);
+
+  return { ...history, loading, failed };
+}
+
 export function useEnergySeries(intervalMs = 10000) {
   const { baseUrl } = useBackend();
   const [series, setSeries] = useState({

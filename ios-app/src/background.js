@@ -8,6 +8,31 @@ const DEFAULT_LONGITUDE = 26.1025;
 const DAY_MINUTES = 24 * 60;
 const SOLAR_ZENITH = 90.833;
 
+// Every zone is the same render of the same house at a different time of day, at the
+// same size and framing — so the roof's panel array sits in one spot for all of them.
+export const BACKGROUND_SIZE = { width: 768, height: 1376 };
+
+// Centre of the panel array, as a fraction of the background image (not the screen).
+// The image is drawn with `resizeMode="cover"`, so callers have to map this through
+// the cover transform to get a screen coordinate — see `panelAnchorOnScreen`.
+export const PANEL_ANCHOR = { x: 0.42, y: 0.32 };
+
+// Where the panel array lands on screen once the background has been cover-scaled and
+// centred. `cover` scales by whichever axis needs more, then overflows equally on the
+// other, so the anchor cannot just be multiplied by the screen size.
+export function panelAnchorOnScreen(screenWidth, screenHeight) {
+  const scale = Math.max(
+    screenWidth / BACKGROUND_SIZE.width,
+    screenHeight / BACKGROUND_SIZE.height
+  );
+  const drawnWidth = BACKGROUND_SIZE.width * scale;
+  const drawnHeight = BACKGROUND_SIZE.height * scale;
+  return {
+    x: (screenWidth - drawnWidth) / 2 + PANEL_ANCHOR.x * drawnWidth,
+    y: (screenHeight - drawnHeight) / 2 + PANEL_ANCHOR.y * drawnHeight,
+  };
+}
+
 export const ZONES = {
   dawn: {
     key: "dawn",

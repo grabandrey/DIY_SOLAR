@@ -14,7 +14,6 @@ import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
 import { StatusBar } from "expo-status-bar";
 import MaskedView from "@react-native-masked-view/masked-view";
-import Svg, { Circle, Path } from "react-native-svg";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
@@ -31,6 +30,7 @@ import {
   kw,
 } from "../metrics";
 import { deviceImageSource } from "../deviceImages";
+import StatIcon from "../components/StatIcon";
 import { useDeviceNames, resolveDeviceName } from "../deviceNames";
 import {
   useDeviceIcons,
@@ -325,48 +325,6 @@ function DeviceArt({ reading, type, image }) {
   );
 }
 
-// Exact paths from the downloaded Lucide sun and house-plug SVG assets.
-function StatIcon({ name }) {
-  return (
-    <Svg
-      width={24}
-      height={24}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke={colors.white}
-      strokeWidth={1.7}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      style={styles.statIcon}
-    >
-      {name === "solar" ? (
-        <>
-          <Circle cx="12" cy="12" r="4" />
-          <Path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
-        </>
-      ) : name === "load" ? (
-        <>
-          <Path d="M10 12V8.964M14 12V8.964" />
-          <Path d="M15 12a1 1 0 0 1 1 1v2a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2a1 1 0 0 1 1-1z" />
-          <Path d="M8.5 21H5a2 2 0 0 1-2-2v-9a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2h-5a2 2 0 0 1-2-2v-2" />
-        </>
-      ) : name === "battery-voltage" ? (
-        <>
-          <Path d="m11 7-3 5h4l-3 5" />
-          <Path d="M14.856 6H16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.935M22 14v-4M5.14 18H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2.936" />
-        </>
-      ) : name === "battery-current" ? (
-        <Path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2" />
-      ) : (
-        <>
-          <Path d="m12 14 4-4" />
-          <Path d="M3.34 19a10 10 0 1 1 17.32 0" />
-        </>
-      )}
-    </Svg>
-  );
-}
-
 // Page indicator whose active dot grows and slides as the carousel scrolls. Each dot's
 // width/opacity is interpolated from the live scroll offset, so the elongated "pill"
 // travels smoothly between dots instead of snapping.
@@ -601,7 +559,6 @@ const styles = StyleSheet.create({
     marginTop: 18,
   },
   stat: { alignItems: "center", flex: 1 },
-  statIcon: { marginBottom: 7 },
   statValue: { color: colors.white, fontSize: 20, fontWeight: "800", letterSpacing: -0.4 },
   statUnit: { color: WHITE_DIM, fontSize: 12, fontWeight: "700" },
   statLabel: { color: WHITE_DIM, fontSize: 12, marginTop: 4 },
