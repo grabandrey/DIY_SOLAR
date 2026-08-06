@@ -72,9 +72,16 @@ export default function BatteryInfoSheet({ reading, onClose }) {
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
         <Animated.View style={[styles.sheet, { transform: [{ translateY }] }]}>
           {glass ? (
-            <GlassView glassEffectStyle="clear" style={StyleSheet.absoluteFill} />
+            <GlassView
+              glassEffectStyle="clear"
+              style={[StyleSheet.absoluteFill, styles.surface]}
+            />
           ) : null}
-          <BlurView intensity={50} tint="dark" style={StyleSheet.absoluteFill} />
+          <BlurView
+            intensity={50}
+            tint="dark"
+            style={[StyleSheet.absoluteFill, styles.surface]}
+          />
           <View style={[StyleSheet.absoluteFill, styles.tint]} />
           <View style={styles.grabber} />
           <View style={styles.header}>
@@ -140,6 +147,15 @@ function Summary({ label, value }) {
 
 const styles = StyleSheet.create({
   root: { flex: 1, justifyContent: "flex-end", backgroundColor: "transparent" },
+  // The backdrop-sampling layers carry the sheet's own top radius; a bare
+  // absoluteFill would render square and be cropped by `overflow: hidden`, leaving a
+  // line at each top corner. No hairline adjustment here — the sheet has no border,
+  // so the child box matches it exactly.
+  surface: {
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    borderCurve: "continuous",
+  },
   sheet: {
     maxHeight: "88%",
     backgroundColor: "transparent",

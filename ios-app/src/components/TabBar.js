@@ -264,16 +264,18 @@ export default function TabBar({ state, navigation }) {
           <BlurView
             intensity={2}
             tint="light"
-            style={StyleSheet.absoluteFill}
+            style={[StyleSheet.absoluteFill, styles.selectorSurface]}
             pointerEvents="none"
           />
           <GlassView
             glassEffectStyle="clear"
-            style={StyleSheet.absoluteFill}
+            style={[StyleSheet.absoluteFill, styles.selectorSurface]}
           />
         </>
       ) : (
-        <View style={[StyleSheet.absoluteFill, styles.selectorFallback]} />
+        <View
+          style={[StyleSheet.absoluteFill, styles.selectorSurface, styles.selectorFallback]}
+        />
       )}
     </Animated.View>
   );
@@ -337,14 +339,24 @@ export default function TabBar({ state, navigation }) {
             <GlassView
               glassEffectStyle="clear"
               tintColor="rgba(0,0,0,0.52)"
-              style={StyleSheet.absoluteFill}
+              style={[StyleSheet.absoluteFill, styles.barSurface]}
               pointerEvents="none"
             />
             {/* very subtle blur layered under the glass for extra depth */}
-            <BlurView intensity={10} tint="dark" style={StyleSheet.absoluteFill} pointerEvents="none" />
+            <BlurView
+              intensity={10}
+              tint="dark"
+              style={[StyleSheet.absoluteFill, styles.barSurface]}
+              pointerEvents="none"
+            />
           </>
         ) : (
-          <BlurView intensity={40} tint="light" style={StyleSheet.absoluteFill} pointerEvents="none" />
+          <BlurView
+            intensity={40}
+            tint="light"
+            style={[StyleSheet.absoluteFill, styles.barSurface]}
+            pointerEvents="none"
+          />
         )}
         {inner}
       </View>
@@ -383,6 +395,22 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.16,
     shadowRadius: 24,
     elevation: 12,
+  },
+  // Liquid Glass and BlurView sample the backdrop along their OWN edges. Left as a
+  // bare absoluteFill they render square, and the parent's `overflow: hidden` then
+  // crops that square to the rounded pill — leaving a visible line running into each
+  // corner. Giving them the radius makes the material curve with the pill instead.
+  //
+  // The radius is one hairline smaller than the container's: an absoluteFill child
+  // sits inside the container's border, so matching the outer radius exactly would
+  // leave the two curves fractionally non-concentric.
+  barSurface: {
+    borderRadius: BAR_RADIUS - StyleSheet.hairlineWidth,
+    borderCurve: "continuous",
+  },
+  selectorSurface: {
+    borderRadius: SELECTOR_RADIUS - StyleSheet.hairlineWidth,
+    borderCurve: "continuous",
   },
   barFallback: {
     borderColor: "rgba(255,255,255,0.45)",

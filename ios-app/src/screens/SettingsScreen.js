@@ -13,12 +13,13 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTranslation } from "react-i18next";
-import { colors, radius } from "../theme";
+import { LinearGradient } from "expo-linear-gradient";
+import { StatusBar } from "expo-status-bar";
+import { colors, darkPage, radius } from "../theme";
 import { useApi, useBackend, useDiscovery } from "../api";
 import { setAppLanguage } from "../i18n";
 import { useProfile } from "../profile";
 import ChipSelect from "../components/ChipSelect";
-import TimeGradientBackground from "../components/TimeGradientBackground";
 
 // A generic placeholder icon for a configured device in Settings. The actual device icon
 // (photo) is chosen on the device page, so Settings only needs to tell batteries from
@@ -107,7 +108,18 @@ export default function SettingsScreen() {
   const attachedKeys = new Set(devices.map((d) => portKey(d.transport)));
 
   return (
-    <TimeGradientBackground>
+    <View style={styles.page}>
+      {/* Same fixed dark ground as Analytics — deliberately not the time-of-day
+          gradient, so the page reads the same at any hour. */}
+      <StatusBar style="light" />
+      <LinearGradient
+        colors={darkPage}
+        locations={[0, 0.48, 1]}
+        start={{ x: 0.15, y: 0 }}
+        end={{ x: 0.85, y: 1 }}
+        style={StyleSheet.absoluteFill}
+        pointerEvents="none"
+      />
       <ScrollView
         style={styles.screen}
         contentContainerStyle={{ paddingTop: insets.top + 12, paddingBottom: 150, paddingHorizontal: 16 }}
@@ -265,7 +277,7 @@ export default function SettingsScreen() {
 
         {busy && <ActivityIndicator style={{ marginTop: 20 }} color={colors.ink} />}
       </ScrollView>
-    </TimeGradientBackground>
+    </View>
   );
 }
 
@@ -345,9 +357,18 @@ function ManualForm({ drivers, busy, onAttach }) {
 }
 
 const styles = StyleSheet.create({
+  page: { flex: 1, backgroundColor: darkPage[1] },
   screen: { flex: 1, backgroundColor: "transparent" },
-  title: { fontSize: 28, fontWeight: "800", color: colors.ink, letterSpacing: -0.6, marginBottom: 8 },
-  section: { fontSize: 13, fontWeight: "700", color: colors.muted, textTransform: "uppercase", letterSpacing: 0.5, marginTop: 22, marginBottom: 10 },
+  title: { fontSize: 28, fontWeight: "800", color: colors.white, letterSpacing: -0.6, marginBottom: 8 },
+  section: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "rgba(255,255,255,0.6)",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginTop: 22,
+    marginBottom: 10,
+  },
   sectionRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 22, marginBottom: 10 },
   languageCard: { flexDirection: "row", alignItems: "center", gap: 16 },
   card: {

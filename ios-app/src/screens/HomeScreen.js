@@ -16,17 +16,11 @@ import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
 import MaskedView from "@react-native-masked-view/masked-view";
 import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
-import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
 import { useTranslation } from "react-i18next";
-import { colors, radius as radii } from "../theme";
-import Svg, { Path } from "react-native-svg";
-import {
-  panelAnchorOnScreen,
-  sunTimesForDate,
-  useCurrentBackground,
-} from "../background";
+import { colors } from "../theme";
+import { sunTimesForDate, useCurrentBackground } from "../background";
 import {
   useDailyEnergy,
   useDiscovery,
@@ -49,19 +43,21 @@ import LineChart from "../components/LineChart";
 
 const glass = isLiquidGlassAvailable();
 
-// The pinned cards fade out over this much scrolling.
-const PINNED_FADE_DISTANCE = 130;
+// The pinned cards travel out over half the screen height, and the scroll snaps to
+// one end or the other — so a short drag springs back rather than leaving them
+// stranded half-way. Computed per render since it depends on the window.
+const CARD_EXIT_FRACTION = 0.5;
+// Extra air between the pinned row and the first scrolling card.
+const SCROLL_GAP = 44;
 // The tab bar floats at `bottom: 28` and stands ITEM + PAD_Y * 2 = 72 tall, so it
 // owns the last 100pt of the screen; leave a little air above it on top of that.
 const TAB_BAR_RESERVE = 116;
-// Dot pitch of the pointer line. One full cycle of travel equals one gap, so the
-// dots appear to march continuously toward the roof rather than restarting.
-const DOT_PITCH = 15;
-const DOT_WIDTH = 5;
+// Side gutter from the screen edge. The solar card already sat this far in, and the
+// load/battery row now matches it instead of running to the bezel.
+const PAGE_GUTTER = 16;
 // Gutter between the load and battery cards. Shared by the width maths and the row
 // style so the pair always adds up to exactly the screen width.
 const CARD_ROW_GAP = 24;
-const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 // Sage green for the solar production graph (trace + fill) and its toggle, and a
 // subtle red for the load graph and its toggle — both softened a touch.
@@ -236,23 +232,6 @@ function CarouselDots({ count, scrollX, stride }) {
         });
         return <Animated.View key={i} style={[styles.dot, { width: dotWidth, opacity }]} />;
       })}
-    </View>
-  );
-}
-
-function HeaderGlass({ children, style }) {
-  return (
-    <View style={[styles.headerGlass, style]}>
-      {glass ? (
-        <GlassView
-          glassEffectStyle="clear"
-          style={StyleSheet.absoluteFill}
-          pointerEvents="none"
-        />
-      ) : (
-        <View style={[StyleSheet.absoluteFill, styles.glassFallback]} />
-      )}
-      {children}
     </View>
   );
 }
@@ -489,7 +468,7 @@ function withLivePoint(points, key, value, start, end) {
   return [...base.slice(0, -1), live];
 }
 
-export default function HomeScreen({ navigation }) {
+export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { t, i18n } = useTranslation();
   const { name } = useProfile();
@@ -518,10 +497,14 @@ export default function HomeScreen({ navigation }) {
   // screen edge, the battery card off the right, so between them they span the whole
   // width with a single gutter in the middle. The load card takes the larger share.
   const hasBatteries = readings.some((reading) => reading.kind === "bms");
+  // Everything the row has to share, once both side gutters are taken out.
+  const rowWidth = width - PAGE_GUTTER * 2;
   const loadCardWidth = hasBatteries
-    ? Math.round((width - CARD_ROW_GAP) * 0.62)
-    : width;
-  const batteryCardWidth = hasBatteries ? width - CARD_ROW_GAP - loadCardWidth : 0;
+    ? Math.round((rowWidth - CARD_ROW_GAP) * 0.62)
+    : rowWidth;
+  const batteryCardWidth = hasBatteries
+    ? rowWidth - CARD_ROW_GAP - loadCardWidth
+    : 0;
   // The 20pt cap is the size these actually want; the divisor is the guard that keeps
   // a five-character watts figure ("-1234") plus its unit inside a narrow card, since
   // LiveStat lays that out at roughly 4.05em wide plus its 2pt gap.
@@ -549,16 +532,14 @@ export default function HomeScreen({ navigation }) {
   // Once the pinned cards have faded they must stop swallowing taps, so the layer's
   // pointerEvents follows the same threshold the fade does.
   const [pinnedHidden, setPinnedHidden] = useState(false);
+  const [headerHeight, setHeaderHeight] = useState(0);
+  // Guards the programmatic snap from re-entering through its own momentum event.
+  const snapping = useRef(false);
   // Bumped on every focus to remount the glass layers — see `useFocusEffect` below.
   const [focusTick, setFocusTick] = useState(0);
   const scrollRef = useRef(null);
   const inverterScrollX = useRef(new Animated.Value(0)).current;
-  // Bottom-centre of the solar card in screen space — the pointer line starts here.
-  const [solarCardRect, setSolarCardRect] = useState(null);
-  const solarCardRef = useRef(null);
   const scrollY = useRef(new Animated.Value(0)).current;
-  const dotPhase = useRef(new Animated.Value(0)).current;
-  const pulse = useRef(new Animated.Value(0)).current;
   const [solarRange, setSolarRange] = useState("hour");
   const [loadRange, setLoadRange] = useState("hour");
   const [graphScrubbing, setGraphScrubbing] = useState(false);
@@ -668,135 +649,47 @@ export default function HomeScreen({ navigation }) {
   );
 
   // The greeting and the pointer line fade; the cards leave sideways instead.
-  const pinnedOpacity = scrollY.interpolate({
-    inputRange: [0, PINNED_FADE_DISTANCE],
-    outputRange: [1, 0],
-    extrapolate: "clamp",
-  });
+  const exitDistance = Math.round(height * CARD_EXIT_FRACTION);
+  // Where the scrolling content begins, and where it comes to rest once committed:
+  // scrolled right up so the first card sits just under the pinned greeting, with no
+  // dead space left between them.
+  const contentTop = height - TAB_BAR_RESERVE + SCROLL_GAP;
+  const restOffset = Math.max(
+    exitDistance,
+    contentTop - (insets.top + 8 + headerHeight + 16)
+  );
 
+  // Commit to one end or the other. `snapToOffsets` cannot express this: it snaps to
+  // whichever offset is nearer, whereas the cards should only leave once past half the
+  // screen, and then travel further than that to their resting place.
+  const settleScroll = (event) => {
+    if (snapping.current) {
+      snapping.current = false;
+      return;
+    }
+    const y = event.nativeEvent.contentOffset.y;
+    if (y <= 0 || y >= restOffset) return;
+    const target = y < exitDistance ? 0 : restOffset;
+    if (Math.abs(y - target) < 1) return;
+    snapping.current = true;
+    scrollRef.current?.scrollTo({ y: target, animated: true });
+  };
   // Each card slides off whichever screen edge it already sits against, travelling
   // exactly far enough to clear it. The two bottom cards span the full width between
-  // them, so their own widths are the distances; the solar card is inset, so it also
-  // has to cover its left gutter — taken from the measured rect when there is one.
+  // them, plus the gutter outside them. The solar card is inset and shrink-
+  // wrapped around a live number, so it just travels a full screen width — more than
+  // it needs, but guaranteed to clear the edge at any reading.
   const slideOff = (distance) =>
     scrollY.interpolate({
-      inputRange: [0, PINNED_FADE_DISTANCE],
+      inputRange: [0, exitDistance],
       outputRange: [0, distance],
       extrapolate: "clamp",
     });
-  const solarSlideX = slideOff(
-    -(solarCardRect ? solarCardRect.x + solarCardRect.width : width)
-  );
-  const loadSlideX = slideOff(-loadCardWidth);
-  const batterySlideX = slideOff(batteryCardWidth);
-
-  // March the dots along the line, one dot-pitch per cycle, forever.
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.timing(dotPhase, {
-        toValue: 1,
-        duration: 900,
-        easing: Easing.linear,
-        // strokeDashoffset is an SVG prop, not a transform — it cannot be
-        // native-driven, so this one stays on the JS driver.
-        useNativeDriver: false,
-      })
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [dotPhase]);
-
-  const panelPoint = panelAnchorOnScreen(width, height);
-
-  // Tested against the figure actually on screen, so the line never turns green
-  // while the card still reads 0.00.
-  const producing = Number(kw(production)) > 0;
-
-  // Idle, the dots run card -> roof. Once the panels are generating, the flow is
-  // real and points the other way: roof -> card. A negative dash offset advances
-  // the pattern along the path, so a positive one walks it back.
-  const dotOffset = dotPhase.interpolate({
-    inputRange: [0, 1],
-    outputRange: producing ? [0, DOT_PITCH] : [0, -DOT_PITCH],
-  });
-
-  // Breathe the stroke while generating; hold it steady when idle.
-  useEffect(() => {
-    if (!producing) {
-      pulse.setValue(0);
-      return undefined;
-    }
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, {
-          toValue: 1,
-          duration: 750,
-          easing: Easing.inOut(Easing.quad),
-          useNativeDriver: false,
-        }),
-        Animated.timing(pulse, {
-          toValue: 0,
-          duration: 750,
-          easing: Easing.inOut(Easing.quad),
-          useNativeDriver: false,
-        }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [producing, pulse]);
-
-  const dotOpacity = producing
-    ? pulse.interpolate({ inputRange: [0, 1], outputRange: [0.4, 1] })
-    : 1;
-
-  // An elbow rather than a diagonal: drop straight out of the card's bottom edge,
-  // turn once through 90 degrees, then run flat into the panel array. The corner is
-  // eased with a small arc so the marching dots round it instead of stacking up.
-  const pointerPath = (() => {
-    if (!solarCardRect) return null;
-    const startX = Math.round(solarCardRect.x + solarCardRect.width / 2);
-    const startY = Math.round(solarCardRect.y + solarCardRect.height);
-    const endX = Math.round(panelPoint.x);
-    const endY = Math.round(panelPoint.y);
-    // Nothing sensible to draw if the anchor sits above the card's bottom edge.
-    if (endY <= startY) return null;
-    const turnRight = endX >= startX;
-    // Descending then turning right is counter-clockwise on screen, which is
-    // sweep-flag 0 (SVG measures positive angles clockwise in its y-down space).
-    // The opposite flag puts the arc's centre on the incoming path and cusps.
-    const sweep = turnRight ? 0 : 1;
-    const radius = Math.min(14, Math.abs(endX - startX), endY - startY);
-    if (radius < 2) return `M ${startX} ${startY} L ${endX} ${endY}`;
-    return [
-      `M ${startX} ${startY}`,
-      `L ${startX} ${endY - radius}`,
-      `A ${radius} ${radius} 0 0 ${sweep} ${startX + (turnRight ? radius : -radius)} ${endY}`,
-      `L ${endX} ${endY}`,
-    ].join(" ");
-  })();
-
-  // Window coordinates, so the line's origin is correct regardless of how the card
-  // is nested. The card is shrink-wrapped around a live number, so this re-fires
-  // while the width morphs — ignore sub-2pt moves to keep that from re-rendering
-  // the screen on every frame of the animation.
-  const measureSolarCard = () => {
-    solarCardRef.current?.measureInWindow((x, y, cardWidth, cardHeight) => {
-      if (!cardWidth || !cardHeight) return;
-      setSolarCardRect((previous) => {
-        if (
-          previous &&
-          Math.abs(previous.x - x) < 2 &&
-          Math.abs(previous.y - y) < 2 &&
-          Math.abs(previous.width - cardWidth) < 2 &&
-          Math.abs(previous.height - cardHeight) < 2
-        ) {
-          return previous;
-        }
-        return { x, y, width: cardWidth, height: cardHeight };
-      });
-    });
-  };
+  const solarSlideX = slideOff(-width);
+  // Each card must cross its own width *and* the gutter it sits behind, or a strip of
+  // it stays parked against the bezel.
+  const loadSlideX = slideOff(-(PAGE_GUTTER + loadCardWidth));
+  const batterySlideX = slideOff(PAGE_GUTTER + batteryCardWidth);
 
   return (
     <View style={styles.screen}>
@@ -819,11 +712,18 @@ export default function HomeScreen({ navigation }) {
         contentContainerStyle={{
           // Everything above is pinned, so the scrolling content starts just below
           // the pinned row and rises into view as those fade out.
-          paddingTop: height - TAB_BAR_RESERVE + 12,
+          paddingTop: height - TAB_BAR_RESERVE + SCROLL_GAP,
           paddingBottom: 150,
         }}
         showsVerticalScrollIndicator={false}
+        // Either the cards are fully out or fully in — never parked mid-slide.
+        // Past the second offset the page scrolls normally.
         scrollEventThrottle={16}
+        onMomentumScrollEnd={settleScroll}
+        // A slow release produces no momentum event, so settle on the drag instead.
+        onScrollEndDrag={(e) => {
+          if (Math.abs(e.nativeEvent.velocity?.y ?? 0) < 0.1) settleScroll(e);
+        }}
         onScroll={Animated.event(
           [{ nativeEvent: { contentOffset: { y: scrollY } } }],
           {
@@ -831,7 +731,7 @@ export default function HomeScreen({ navigation }) {
             // Flips once per crossing, not per frame.
             listener: (e) => {
               const hidden =
-                e.nativeEvent.contentOffset.y >= PINNED_FADE_DISTANCE - 1;
+                e.nativeEvent.contentOffset.y >= exitDistance - 1;
               setPinnedHidden((previous) => (previous === hidden ? previous : hidden));
             },
           }
@@ -928,54 +828,29 @@ export default function HomeScreen({ navigation }) {
         pointerEvents={pinnedHidden ? "none" : "box-none"}
         style={StyleSheet.absoluteFill}
       >
-        {/* Dotted pointer from the card's bottom edge to the roof's panel array. */}
-        {pointerPath && (
-          <Animated.View
-            pointerEvents="none"
-            style={[StyleSheet.absoluteFill, { opacity: pinnedOpacity }]}
-          >
-            <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
-              <AnimatedPath
-                d={pointerPath}
-                fill="none"
-                stroke={producing ? SOLAR_GREEN : "rgba(255,255,255,0.85)"}
-                strokeOpacity={dotOpacity}
-                strokeWidth={DOT_WIDTH}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                // A zero-length dash with a round cap renders as a dot.
-                strokeDasharray={`0.01 ${DOT_PITCH}`}
-                strokeDashoffset={dotOffset}
-              />
-            </Svg>
-          </Animated.View>
-        )}
-
         <View
           pointerEvents="box-none"
           style={[styles.pinnedHead, { top: insets.top + 8 }]}
         >
-          <Animated.View style={[styles.header, { opacity: pinnedOpacity }]}>
+          {/* The greeting stays legible the whole way up — only the cards leave. */}
+          <View
+            style={styles.header}
+            onLayout={(e) => setHeaderHeight(e.nativeEvent.layout.height)}
+          >
             <View style={styles.headerCopy}>
               <Text style={styles.hello}>
                 {t("home.hello", { name: name.trim() || "James" })}
               </Text>
               <Text style={styles.greeting}>{t(`home.${background.key}`)}</Text>
             </View>
-            <Pressable onPress={() => navigation.navigate("Settings")} hitSlop={8}>
-              <HeaderGlass>
-                <Ionicons name="notifications-outline" size={20} color="#fff" />
-                <View style={styles.bellDot} />
-              </HeaderGlass>
-            </Pressable>
-          </Animated.View>
+          </View>
 
           {/* pointerEvents none so the pinned card never eats scroll gestures. */}
           <Animated.View
             style={[styles.hero, { transform: [{ translateX: solarSlideX }] }]}
             pointerEvents="none"
           >
-            <View ref={solarCardRef} onLayout={measureSolarCard} collapsable={false}>
+            <View style={styles.solarCardWrap}>
               <GlassCard
                 style={styles.statCard}
                 glassStyle="clear"
@@ -989,6 +864,31 @@ export default function HomeScreen({ navigation }) {
                   unitStyle={statUnitStyle}
                 />
               </GlassCard>
+              {/* Sits on the card's bottom-right corner and deliberately overhangs it,
+                  so it reads as a badge on the glass rather than content inside it.
+                  It lives outside GlassCard because that clips to its own bounds. */}
+              <View style={styles.solarBadge} pointerEvents="none">
+                {glass ? (
+                  <GlassView
+                    glassEffectStyle="clear"
+                    style={[StyleSheet.absoluteFill, styles.solarBadgeSurface]}
+                  />
+                ) : (
+                  <View
+                    style={[
+                      StyleSheet.absoluteFill,
+                      styles.solarBadgeSurface,
+                      styles.solarBadgeFallback,
+                    ]}
+                  />
+                )}
+                <StatIcon
+                  name="panel"
+                  size={24}
+                  color={colors.white}
+                  style={styles.solarBadgeIcon}
+                />
+              </View>
             </View>
           </Animated.View>
         </View>
@@ -1007,7 +907,6 @@ export default function HomeScreen({ navigation }) {
             >
             <GlassCard
               style={styles.loadCard}
-              radius={styles.loadCardRadius}
               glassStyle="clear"
               tint="rgba(0,0,0,0.2)"
               blur={8}
@@ -1112,7 +1011,6 @@ export default function HomeScreen({ navigation }) {
               >
               <GlassCard
                 style={styles.batteryCard}
-                radius={styles.batteryCardRadius}
                 glassStyle="clear"
                 tint="rgba(0,0,0,0.2)"
                 blur={8}
@@ -1210,15 +1108,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 20,
   },
-  headerGlass: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    overflow: "hidden",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  glassFallback: { backgroundColor: "rgba(255,255,255,0.18)" },
   headerCopy: { flex: 1 },
   hello: { color: "rgba(255,255,255,0.88)", fontSize: 18, fontWeight: "600", ...shadow },
   greeting: {
@@ -1228,17 +1117,31 @@ const styles = StyleSheet.create({
     letterSpacing: -0.4,
     ...shadow,
   },
-  bellDot: {
-    position: "absolute",
-    top: 11,
-    right: 12,
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-    backgroundColor: colors.yellow,
-  },
   pinnedHead: { position: "absolute", left: 0, right: 0 },
-  pinnedFoot: { position: "absolute", left: 0, right: 0 },
+  // Positioning context for the corner badge; must not clip it.
+  solarCardWrap: { position: "relative" },
+  solarBadge: {
+    position: "absolute",
+    right: -16,
+    bottom: -16,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(255,255,255,0.5)",
+  },
+  solarBadgeSurface: { borderRadius: 23 },
+  solarBadgeFallback: { backgroundColor: "rgba(255,255,255,0.22)" },
+  solarBadgeIcon: { marginBottom: 0 },
+  pinnedFoot: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    paddingHorizontal: PAGE_GUTTER,
+  },
   // Page indicator under the inverter strip.
   dotsRow: {
     flexDirection: "row",
@@ -1253,7 +1156,7 @@ const styles = StyleSheet.create({
     // Cross-axis only: keeps the card at its natural height rather than stretching.
     alignItems: "flex-start",
     gap: 12,
-    paddingHorizontal: 16,
+    paddingHorizontal: PAGE_GUTTER,
     paddingTop: 34,
     paddingBottom: 12,
   },
@@ -1289,19 +1192,6 @@ const styles = StyleSheet.create({
   },
   // `flex: 1` fills the slide wrapper, which is what the row stretches.
   loadCard: { flex: 1, padding: 18 },
-  // Squared where it meets the screen edge, rounded on the inner side.
-  loadCardRadius: {
-    borderTopLeftRadius: 0,
-    borderBottomLeftRadius: 0,
-    borderTopRightRadius: radii.lg,
-    borderBottomRightRadius: radii.lg,
-  },
-  batteryCardRadius: {
-    borderTopLeftRadius: radii.lg,
-    borderBottomLeftRadius: radii.lg,
-    borderTopRightRadius: 0,
-    borderBottomRightRadius: 0,
-  },
   // Bleeds to the card's edges (cancels its 18pt padding) so tiles scroll edge to edge.
   inverterScrollWrap: { marginHorizontal: -18, marginTop: 20 },
   inverterRow: { paddingHorizontal: 18, gap: 12 },

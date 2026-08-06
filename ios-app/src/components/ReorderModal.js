@@ -172,8 +172,17 @@ export default function ReorderModal({ visible, title, items, onClose, onSave })
       <View style={styles.root}>
         <Pressable style={StyleSheet.absoluteFill} onPress={save} />
         <Animated.View style={[styles.sheet, { transform: [{ translateY }] }]}>
-          {glass ? <GlassView glassEffectStyle="clear" style={StyleSheet.absoluteFill} /> : null}
-          <BlurView intensity={50} tint="dark" style={StyleSheet.absoluteFill} />
+          {glass ? (
+            <GlassView
+              glassEffectStyle="clear"
+              style={[StyleSheet.absoluteFill, styles.surface]}
+            />
+          ) : null}
+          <BlurView
+            intensity={50}
+            tint="dark"
+            style={[StyleSheet.absoluteFill, styles.surface]}
+          />
           <View style={[StyleSheet.absoluteFill, styles.tint]} />
           <View style={styles.grabber} />
 
@@ -225,6 +234,15 @@ export default function ReorderModal({ visible, title, items, onClose, onSave })
 
 const styles = StyleSheet.create({
   root: { flex: 1, justifyContent: "flex-end", backgroundColor: "transparent" },
+  // The backdrop-sampling layers carry the sheet's own top radius; a bare
+  // absoluteFill would render square and be cropped by `overflow: hidden`, leaving a
+  // line at each top corner. No hairline adjustment here — the sheet has no border,
+  // so the child box matches it exactly.
+  surface: {
+    borderTopLeftRadius: radius.xl,
+    borderTopRightRadius: radius.xl,
+    borderCurve: "continuous",
+  },
   sheet: {
     maxHeight: "88%",
     backgroundColor: "transparent",

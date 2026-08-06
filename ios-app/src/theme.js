@@ -16,6 +16,10 @@ export const colors = {
   shadow: "#241E12",
 };
 
+// Fixed dark ground for pages that deliberately ignore the time-of-day gradient
+// (Analytics, Settings). Shared so the two never drift apart.
+export const darkPage = ["#3A3835", "#2D2B29", "#232120"];
+
 export const radius = {
   sm: 12,
   md: 18,
