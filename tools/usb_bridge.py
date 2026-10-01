@@ -67,13 +67,75 @@ try:
 except ImportError:
     sys.exit("pyserial is required on the host:  pip3 install pyserial")
 
-# hidapi is optional but required for HID inverters (the common Axpert/Phocos case).
+class _HidrawBackend:
+    """Minimal stand-in for the hidapi module using Linux ``/dev/hidraw*`` directly.
+
+    Lets the bridge drive HID inverters (e.g. INVT/Axpert ``0665:5161``) on a Pi or Linux
+    box without the hidapi Python package. Mirrors just the bits of the 'hidapi' (Trezor)
+    API the bridge uses: ``enumerate()`` and ``Device(path=...)``.
+    """
+
+    @staticmethod
+    def enumerate() -> list[dict]:
+        out = []
+        for node in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+            try:
+                with open(os.path.join(node, "device", "uevent")) as f:
+                    ev = dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line)
+                _bus, vid, pid = ev["HID_ID"].split(":")
+            except (OSError, KeyError, ValueError):
+                continue
+            out.append({
+                "path": f"/dev/{os.path.basename(node)}".encode(),
+                "vendor_id": int(vid, 16),
+                "product_id": int(pid, 16),
+                "product_string": ev.get("HID_NAME", ""),
+                "manufacturer_string": "",
+                "usage_page": 0,
+            })
+        return out
+
+    class Device:
+        def __init__(self, path: bytes):
+            p = path.decode() if isinstance(path, bytes) else path
+            try:
+                self._fd = os.open(p, os.O_RDWR | os.O_NONBLOCK)
+            except PermissionError as exc:
+                raise PermissionError(
+                    f"{exc}. Grant access with a udev rule (see "
+                    f"tools/99-solar-hidraw.rules.example), then replug the inverter"
+                ) from exc
+
+        def write(self, data: bytes) -> int:
+            # Leading byte is the report id (0 = unnumbered), as with hidapi.
+            return os.write(self._fd, bytes(data))
+
+        def read(self, size: int, timeout_ms: int) -> bytes:
+            import select
+            ready, _, _ = select.select([self._fd], [], [], timeout_ms / 1000)
+            if not ready:
+                return b""
+            try:
+                return os.read(self._fd, size)
+            except BlockingIOError:
+                return b""
+
+        def close(self) -> None:
+            os.close(self._fd)
+
+
+# hidapi is optional; HID inverters (the common Axpert/Phocos/INVT case) need it, except on
+# Linux where we fall back to /dev/hidraw directly.
 try:
     import hid as _hid
     HID_OK = True
 except Exception:  # noqa: BLE001
-    _hid = None
-    HID_OK = False
+    if platform.system() == "Linux" and os.path.isdir("/sys/class/hidraw"):
+        _hid = _HidrawBackend
+        HID_OK = True
+    else:
+        _hid = None
+        HID_OK = False
 
 # websocket-client is optional but required for the REVERSE TUNNEL — the mode that lets
 # this bridge run at home while the backend runs in the cloud (e.g. Railway). The bridge

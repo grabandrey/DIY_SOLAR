@@ -1,0 +1,5 @@
+# Let the USB bridge (running as a normal user) open HID inverters such as INVT / Axpert /
+# Phocos (USB id 0665:5161). Install with:
+#   sudo cp tools/99-solar-hidraw.rules.example /etc/udev/rules.d/99-solar-hidraw.rules
+#   sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=hidraw
+KERNEL=="hidraw*", ATTRS{idVendor}=="0665", ATTRS{idProduct}=="5161", MODE="0660", GROUP="plugdev"
