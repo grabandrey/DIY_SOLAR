@@ -65,6 +65,10 @@ def parse_response(raw: bytes) -> str:
     if not raw:
         raise ProtocolError("empty response")
     data = raw.strip(b"\x00").rstrip(b"\r")
+    # HID links can leave the tail of an earlier reply in front of this one; '(' never
+    # appears in a body or (escaped) CRC, so the last one marks the real frame start.
+    if b"(" in data:
+        data = data[data.rindex(b"(") :]
     if not data.startswith(b"("):
         raise ProtocolError(f"bad frame start: {raw!r}")
     if len(data) < 3:
@@ -109,7 +113,15 @@ def parse_qpigs(body: str) -> Dict[str, float]:
         except ValueError:
             continue
 
-    # Derived: PV input power isn't a direct QPIGS field on all firmwares.
+    # Field 19 is the PV charging power in W. Prefer it: field 12 is the PV current on the
+    # battery side on many firmwares (e.g. INVT), so current x PV voltage under-reports.
+    if len(parts) > 19:
+        try:
+            out["pv_input_power"] = float(parts[19])
+            return out
+        except ValueError:
+            pass
+    # Older firmwares without field 19: derive it.
     if "pv_input_current" in out and "pv_input_voltage" in out:
         out["pv_input_power"] = round(out["pv_input_current"] * out["pv_input_voltage"], 1)
     return out

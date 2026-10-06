@@ -990,6 +990,10 @@ class Bridge:
     def _hid_exchange(dev: HidDev, command: bytes, timeout: float = 3.0) -> bytes:
         # Voltronic over HID: write the framed command in 8-byte output reports,
         # then read 8-byte input reports until a carriage return is seen.
+        # Drop any stale reports first (the tail of an earlier, timed-out reply) so they
+        # aren't glued onto this response.
+        while dev.read(8, 20):
+            pass
         for i in range(0, len(command), 8):
             dev.write(command[i : i + 8])
         deadline = time.time() + timeout

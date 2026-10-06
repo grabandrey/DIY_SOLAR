@@ -62,3 +62,18 @@ def test_growatt_driver_registered_and_buildable():
         {"id": "g1", "name": "SPF", "driver": "growatt", "transport": {"type": "mock", "params": {}}}
     )
     assert isinstance(dev, GrowattSPF)
+
+
+def test_parse_qpigs_prefers_reported_pv_power():
+    # Real INVT/Axpert HID reply: field 12 x 13 = 661 W, but field 19 reports 3065 W.
+    body = (
+        "000.0 00.0 230.1 50.0 1677 1677 033 404 54.10 022 089 0047 02.2 300.5 "
+        "00.00 00000 00010010 00 00 03065 010"
+    )
+    assert voltronic.parse_qpigs(body)["pv_input_power"] == 3065.0
+
+
+def test_parse_response_skips_stale_prefix():
+    body = "000.0 00.0 230.1 50.0"
+    framed = b"(000.0 0" + voltronic.frame_response(body)
+    assert voltronic.parse_response(framed) == body
