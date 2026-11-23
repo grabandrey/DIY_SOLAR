@@ -79,11 +79,19 @@ class VoltronicInverter(InverterDevice):
 
     # --- parallel support ----------------------------------------------------
     async def poll_many(self) -> List[Reading]:
-        """Report each parallel-connected inverter separately via QPGS<n>.
+        """Read this connection's inverter, or an explicitly configured parallel stack.
 
-        Falls back to the single-unit QPIGS reading when the inverter isn't in a parallel
-        stack (the common case), which carries more fields than QPGS.
+        Individual connections use QPIGS. Parallel mode uses QPGS<n>, falling back
+        to QPIGS when fewer than two units respond.
         """
+        # Each configured USB connection reads its own inverter. Parallel discovery
+        # is opt-in for installations that deliberately use one cable for a stack.
+        configured_units = self.options.get("units")
+        if configured_units is not None:
+            if int(configured_units) <= 1:
+                return [await self.poll()]
+        elif not self.options.get("parallel", False):
+            return [await self.poll()]
         units = await self._enumerate_parallel()
         if len(units) < 2:
             return [await self.poll()]

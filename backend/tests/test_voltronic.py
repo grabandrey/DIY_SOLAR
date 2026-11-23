@@ -64,6 +64,7 @@ def test_growatt_driver_registered_and_buildable():
     assert isinstance(dev, GrowattSPF)
 
 
+
 def test_parse_qpigs_prefers_reported_pv_power():
     # Real INVT/Axpert HID reply: field 12 x 13 = 661 W, but field 19 reports 3065 W.
     body = (
@@ -77,3 +78,27 @@ def test_parse_response_skips_stale_prefix():
     body = "000.0 00.0 230.1 50.0"
     framed = b"(000.0 0" + voltronic.frame_response(body)
     assert voltronic.parse_response(framed) == body
+
+def test_individual_connections_do_not_probe_parallel_units():
+    from unittest.mock import AsyncMock
+
+    for options in ({}, {"units": 1}, {"units": 1, "parallel": True}):
+        inv = AxpertInverter("phocos-1", "Phocos", MockTransport(jitter=False), options)
+        inv._enumerate_parallel = AsyncMock(side_effect=AssertionError("Parallel probe"))
+        readings = asyncio.run(inv.poll_many())
+        assert len(readings) == 1
+        assert readings[0].device_id == "phocos-1"
+        assert readings[0].online
+        assert set(readings[0].raw) == {"QPIGS", "QMOD"}
+        inv._enumerate_parallel.assert_not_awaited()
+
+
+def test_explicit_parallel_options_still_probe():
+    from unittest.mock import AsyncMock
+
+    for options in ({"units": 2}, {"parallel": True}):
+        inv = AxpertInverter("stack", "Stack", MockTransport(jitter=False), options)
+        inv._enumerate_parallel = AsyncMock(return_value=[])
+        asyncio.run(inv.poll_many())
+        inv._enumerate_parallel.assert_awaited_once()
+

@@ -142,6 +142,11 @@ as **host USB** → pick `axpert`/`phocos`/`growatt` → **Attach**. The backend
 - Discovery is served on `:5510`; each device gets a TCP port from `:5500`. The
   backend's `SA_BRIDGE_URL` (in `docker-compose.yml`) points at it.
 - Multiple inverters/BMS units each get their own entry — attach a driver to each.
+  Connect each Phocos inverter through its own USB controller and attach each separately.
+  Inverters use individual QPIGS readings by default; parallel QPGS polling requires
+  explicit driver options (`parallel: true` to discover units, or `units` greater than 1).
+  After upgrading from the model-wide HID mapping, rescan and reattach identical HID
+  controllers so each saved device points to its own controller.
 
 **Nothing detected when you plug in?** Run the diagnostic:
 

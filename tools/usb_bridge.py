@@ -315,7 +315,7 @@ class HidDev:
 
 
 def _enumerate_hid(include_all: bool, vid_filter, pid_filter) -> list[dict]:
-    """Return HID devices, de-duped per (vid,pid), filtered to likely inverters."""
+    """Return HID controllers, de-duped by device path, filtered to likely inverters."""
     if not HID_OK:
         return []
     out, seen = [], set()
@@ -335,7 +335,7 @@ def _enumerate_hid(include_all: bool, vid_filter, pid_filter) -> list[dict]:
         )
         if not (include_all or likely or (vid_filter is not None)):
             continue
-        key = (vid, pid)
+        key = d["path"]
         if key in seen:
             continue
         seen.add(key)
@@ -764,6 +764,11 @@ class Bridge:
             stable = _stable_serial_path(p.device)
             vidpid_unique = bool(p.vid and p.pid and vidpid_counts.get((p.vid, p.pid)) == 1)
             dev_id = _serial_identity(p, stable, vidpid_unique)
+            # Some USB adapters ship with the same factory serial number.
+            if sum(_serial_identity(other, other.device, False) == dev_id
+                   for other in comports) > 1:
+                dev_id = f"serial:{p.device}"
+                stable = p.device
             found[dev_id] = {
                 "kind": "serial",
                 "target": stable,
@@ -782,12 +787,20 @@ class Bridge:
                 },
             }
 
-        for h in _enumerate_hid(self.all_hid, self.vid_filter, self.pid_filter):
-            found[f"hid:{h['vid']}:{h['pid']}"] = {
+        hid_devices = _enumerate_hid(self.all_hid, self.vid_filter, self.pid_filter)
+        for h in hid_devices:
+            # Identical Phocos controllers share VID/PID; open each exact HID path.
+            path = os.fsdecode(h["path"])
+            legacy_id = f"hid:{h['vid']}:{h['pid']}"
+            same_model = sum((d["vid"], d["pid"]) == (h["vid"], h["pid"])
+                             for d in hid_devices)
+            found[f"{legacy_id}:{path}"] = {
                 "kind": "hid",
                 "target": h["path"],
+                # An old model-wide assignment is only unambiguous for one controller.
+                "legacy_id": legacy_id if same_model == 1 else None,
                 "info": {
-                    "path": f"HID {h['vid']}:{h['pid']} ({h['description']})",
+                    "path": f"HID {h['vid']}:{h['pid']} ({h['description']}) [{path}]",
                     "description": h["description"],
                     "manufacturer": h["manufacturer"],
                     "vid": h["vid"],
