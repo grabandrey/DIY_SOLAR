@@ -314,6 +314,26 @@ class HidDev:
             pass
 
 
+def _hid_identity(device: dict) -> str:
+    """Linux hidraw numbers change on reset; HID_PHYS identifies the USB socket."""
+    prefix = f"hid:{device['vid']}:{device['pid']}"
+    path = os.fsdecode(device["path"])
+    if path.startswith("/dev/hidraw"):
+        try:
+            with open(f"/sys/class/hidraw/{os.path.basename(path)}/device/uevent") as fh:
+                event = dict(line.rstrip().split("=", 1) for line in fh if "=" in line)
+            _, vid, pid = event["HID_ID"].split(":")
+            if (int(vid, 16), int(pid, 16)) != (int(device["vid"], 16), int(device["pid"], 16)):
+                raise OSError("HID node changed during enumeration")
+            if event.get("HID_PHYS"):
+                return f"{prefix}:port:{event['HID_PHYS']}"
+        except (KeyError, ValueError) as exc:
+            raise OSError("Incomplete HID identity") from exc
+        # Do not publish a transient raw node as a new device when sysfs is missing.
+        raise OSError("HID physical identity unavailable")
+    return f"{prefix}:{path}"
+
+
 def _enumerate_hid(include_all: bool, vid_filter, pid_filter) -> list[dict]:
     """Return HID controllers, de-duped by device path, filtered to likely inverters."""
     if not HID_OK:
@@ -711,6 +731,7 @@ class Bridge:
         self.vid_filter = vid_filter
         self.pid_filter = pid_filter
         self.lock = threading.Lock()
+        self.device_locks: dict[str, threading.Lock] = {}
         self.devices: dict[str, dict] = {}  # id -> {kind, tcp_port, info, present, target}
         # Persistent stable_id -> tcp_port map so each physical device keeps the same TCP
         # port across restarts (the backend's attach config points at host:port).
@@ -789,18 +810,18 @@ class Bridge:
 
         hid_devices = _enumerate_hid(self.all_hid, self.vid_filter, self.pid_filter)
         for h in hid_devices:
-            # Identical Phocos controllers share VID/PID; open each exact HID path.
             path = os.fsdecode(h["path"])
-            legacy_id = f"hid:{h['vid']}:{h['pid']}"
-            same_model = sum((d["vid"], d["pid"]) == (h["vid"], h["pid"])
-                             for d in hid_devices)
-            found[f"{legacy_id}:{path}"] = {
+            try:
+                dev_id = _hid_identity(h)
+            except OSError:
+                continue  # reset in progress; retry on the next scan
+            found[dev_id] = {
                 "kind": "hid",
                 "target": h["path"],
-                # An old model-wide assignment is only unambiguous for one controller.
-                "legacy_id": legacy_id if same_model == 1 else None,
+                # Preserve the TCP port when upgrading an existing per-controller entry.
+                "legacy_id": f"hid:{h['vid']}:{h['pid']}:{path}",
                 "info": {
-                    "path": f"HID {h['vid']}:{h['pid']} ({h['description']}) [{path}]",
+                    "path": dev_id,
                     "description": h["description"],
                     "manufacturer": h["manufacturer"],
                     "vid": h["vid"],
@@ -877,17 +898,34 @@ class Bridge:
         threading.Thread(target=serve, daemon=True).start()
 
     def _dispatch(self, conn: socket.socket, addr, dev_id: str) -> None:
+        with self.lock:
+            device_lock = self.device_locks.setdefault(dev_id, threading.Lock())
+        if not device_lock.acquire(blocking=False):
+            log.warning("device %s is busy; rejecting competing client", dev_id)
+            conn.close()
+            return
         entry = self.devices.get(dev_id, {})
         label = entry.get("info", {}).get("path", dev_id)
         peer = f"{addr[0]}:{addr[1]}"
         t0 = time.time()
         log.info("client %s connected for %s", peer, label)
         try:
+            if not entry.get("present"):
+                return
             if entry.get("kind") == "hid":
+                try:
+                    actual_id = _hid_identity({**entry["info"], "path": entry["target"]})
+                except OSError:
+                    return
+                if actual_id != dev_id:
+                    log.warning("HID node changed for %s; waiting for rescan", dev_id)
+                    return
                 self._relay_hid(conn, entry["target"], peer, label)
             else:
                 self._relay_serial(conn, entry.get("target"), peer, label)
         finally:
+            conn.close()
+            device_lock.release()
             log.info("client %s closed %s after %.1fs", peer, label, time.time() - t0)
 
     @staticmethod
