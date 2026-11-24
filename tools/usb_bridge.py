@@ -900,7 +900,9 @@ class Bridge:
     def _dispatch(self, conn: socket.socket, addr, dev_id: str) -> None:
         with self.lock:
             device_lock = self.device_locks.setdefault(dev_id, threading.Lock())
-        if not device_lock.acquire(blocking=False):
+        # A transport retry can arrive while the previous relay is closing its USB
+        # handle. Allow that short handoff without opening the controller twice.
+        if not device_lock.acquire(timeout=1.0):
             log.warning("device %s is busy; rejecting competing client", dev_id)
             conn.close()
             return
